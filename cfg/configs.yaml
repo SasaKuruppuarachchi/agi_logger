@@ -1,0 +1,36 @@
+agi_logger:
+  verbosity: INFO
+  logger:
+    bag_path: ~/workspace/logging/bags
+    topics: [
+      /clock,
+      /fmu/out/vehicle_control_mode,
+      /fmu/out/vehicle_status,
+      /occupancy_map/inflated_voxel_map,
+      /drone0/self_localization/pose,
+      /navigation_runner/goal,
+      /drone0/self_localization/path,
+      /offboard_velocity_cmd,
+      /drone1/RealSense_Camera/color/image_raw,
+      /tf, 
+      /tf_static 
+    ]
+    name: agi_test_log
+    max_bag_size: -1 # in MB -1 for unlimited
+    override_qos: false
+    qos_settings: cfg/qos_profiles.yaml
+    compress: true
+    max_bag_size: -1 # in GB -1 for unlimited
+    duration: -1 # in minutes -1 for unlimited
+    mcap: true
+    auto_start: true
+    auto_start_behavior: toggle_arm
+  tcp_file_communication:
+    mode: ask # ask | server | client
+    server:
+      port: 6000
+      file_path: ~/workspace/logging/bags/test_send/test
+    client:
+      host: localhost
+      port: 6000
+      destination_path: ~/workspace/logging/bags/test_receive

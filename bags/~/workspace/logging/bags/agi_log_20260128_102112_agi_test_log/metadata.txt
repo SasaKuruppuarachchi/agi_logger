@@ -1,0 +1,20 @@
+bag_name: agi_log_20260128_102112_agi_test_log
+bag_path: ~/workspace/logging/bags
+date: 2026-01-28T10:21:12+02:00
+hostname: WKS-102746-NLT
+user: admin
+ros_distro: humble
+kernel: 6.17.9-76061709-generic
+topics:
+  - /clock
+  - /fmu/out/vehicle_control_mode
+  - /fmu/out/vehicle_status
+  - /occupancy_map/inflated_voxel_map
+  - /drone0/self_localization/pose
+  - /navigation_runner/goal
+  - /drone0/self_localization/path
+  - /offboard_velocity_cmd
+  - /drone1/RealSense_Camera/color/image_raw
+qos_override_file: qos.yaml
+max_bag_size: 2147483648
+git_commit: d9266ea4ec52cd95ffd7a8811f798e61772b152a
