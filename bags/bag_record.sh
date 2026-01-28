@@ -22,7 +22,9 @@ while true; do
   echo "Starting new recording: $BAG_NAME (PID will follow)..."
 
   # Launch recorder in background
-  ros2 bag record -o "$BAG_NAME" \
+  ros2 bag record --storage mcap \
+    --compression-mode file \
+    --compression-format zstd -o "$BAG_NAME" \
     /ground0/livox/imu \
     /ground0/livox/lidar \
     /image_raw \

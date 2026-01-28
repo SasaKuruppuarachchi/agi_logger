@@ -1,0 +1,25 @@
+topics:
+  control_mode:
+    name: /fmu/out/vehicle_control_mode
+    type: px4_msgs/msg/VehicleControlMode
+  vehicle_status:
+    name: /fmu/out/vehicle_status
+    type: px4_msgs/msg/VehicleStatus
+  inflated_voxel_map:
+    name: /occupancy_map/inflated_voxel_map
+    type: sensor_msgs/msg/PointCloud2
+  self_localization_pose:
+    name: /drone0/self_localization/pose
+    type: geometry_msgs/msg/PoseStamped
+  navigation_goal:
+    name: /navigation_runner/goal
+    type: visualization_msgs/msg/MarkerArray
+  self_localization_path:
+    name: /drone0/self_localization/path
+    type: nav_msgs/msg/Path
+  offboard_velocity_cmd:
+    name: /offboard_velocity_cmd
+    type: geometry_msgs/msg/Twist
+  realsense_color_image_raw:
+    name: /drone1/RealSense_Camera/color/image_raw
+    type: sensor_msgs/msg/Image
