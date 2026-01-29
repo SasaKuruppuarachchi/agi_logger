@@ -3,6 +3,13 @@ from __future__ import annotations
 import argparse
 import os
 import curses
+import select
+import sys
+import termios
+import tty
+import signal
+import subprocess
+import pty
 from pathlib import Path
 from typing import Any, Dict
 
@@ -54,7 +61,7 @@ def _print_title() -> None:
     print()
     for line in title_lines:
         print(f"{ORANGE}{line}{RESET}")
-    print(f"{CYAN}    Advanced ROS2 logging for Agibix Platform{RESET}\n")
+    print(f"{CYAN}    Advanced ROS2 logging for Agipix Platform{RESET}\n")
 
 
 def _load_config(config_path: Path) -> Dict[str, Any]:
@@ -442,13 +449,19 @@ def _list_bag_dirs(path: str) -> list[str]:
     return sorted([p.name for p in base.iterdir() if p.is_dir()])
 
 
-def _curses_select(options: list[str], title: str, hint: str) -> tuple[str, int | None]:
+def _curses_select(
+    options: list[str],
+    title: str,
+    hint: str,
+    initial_index: int | None = None,
+    last_played_index: int | None = None,
+) -> tuple[str, int | None]:
     def _inner(stdscr: "curses._CursesWindow") -> tuple[str, int | None]:
         curses.curs_set(0)
         stdscr.nodelay(False)
         stdscr.keypad(True)
 
-        index = 0
+        index = initial_index or 0
         offset = 0
 
         while True:
@@ -472,7 +485,8 @@ def _curses_select(options: list[str], title: str, hint: str) -> tuple[str, int 
                     if opt_index >= len(options):
                         break
                     label = options[opt_index]
-                    line = f"{label}"
+                    prefix = "* " if last_played_index == opt_index else "  "
+                    line = f"{prefix}{label}"
                     y = row + 3
                     if opt_index == index:
                         stdscr.addstr(y, 0, line[: width - 1], curses.A_REVERSE)
@@ -499,16 +513,55 @@ def _curses_select(options: list[str], title: str, hint: str) -> tuple[str, int 
     return curses.wrapper(_inner)
 
 
+def _run_rosbag_play_with_quit(cmd: list[str]) -> int:
+    try:
+        master_fd, slave_fd = pty.openpty()
+        process = subprocess.Popen(cmd, stdin=slave_fd)
+    except FileNotFoundError:
+        print("Command not found. Ensure ROS 2 is installed and available in PATH.")
+        return 1
+
+    os.close(slave_fd)
+
+    try:
+        tty_handle = open("/dev/tty", "rb")
+    except OSError:
+        os.close(master_fd)
+        return process.wait()
+
+    fd = tty_handle.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while process.poll() is None:
+            readable, _, _ = select.select([tty_handle], [], [], 0.1)
+            if readable:
+                data = os.read(fd, 1024)
+                if not data:
+                    continue
+                if b"q" in data or b"Q" in data:
+                    process.send_signal(signal.SIGINT)
+                    break
+                os.write(master_fd, data)
+        return process.wait()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        tty_handle.close()
+        os.close(master_fd)
+
+
 def _play_menu(config_path: Path, initial_path: str | None = None) -> int:
     config = _load_config(config_path)
     logger_cfg = config.get("agi_logger", {}).get("logger", {})
     bag_path = initial_path or str(logger_cfg.get("bag_path", "."))
+    last_played: str | None = None
 
     while True:
         options = _list_bag_dirs(bag_path)
         title = f"Select a bag to play (path: {bag_path})"
-        hint = "UP/DOWN to select, Enter to play, c change dir, q back"
-        action, index = _curses_select(options, title, hint)
+        hint = "UP/DOWN to select, Enter to play, c change dir, q back (during play press q to stop)"
+        last_index = options.index(last_played) if last_played in options else None
+        action, index = _curses_select(options, title, hint, last_index, last_index)
 
         if action == "cancel":
             return 0
@@ -521,7 +574,9 @@ def _play_menu(config_path: Path, initial_path: str | None = None) -> int:
             selected = options[index]
             full_path = str(Path(bag_path).expanduser() / selected)
             cmd = ["ros2", "bag", "play", full_path]
-            return _run_command(cmd)
+            _run_rosbag_play_with_quit(cmd)
+            last_played = selected
+            continue
 
 
 def _play_command(args: argparse.Namespace) -> int:

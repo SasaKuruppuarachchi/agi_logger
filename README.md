@@ -10,7 +10,7 @@
 ██║     ██║   ██║██║   ██║██║   ██║██╔══╝  ██╔══██╗
 ███████╗╚██████╔╝╚██████╔╝╚██████╔╝███████╗██║  ██║
 ╚══════╝ ╚═════╝  ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝
-    Advanced ROS2 logging for Agibix Platform
+    Advanced ROS2 logging for Agipix Platform
 
 Interactive CLI and ROS 2 autostart logger for recording ROS 2 bags and transferring files over TCP.
 
