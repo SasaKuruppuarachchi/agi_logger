@@ -26,6 +26,11 @@ CYAN = "\033[36m"
 MAGENTA = "\033[35m"
 RED = "\033[31m"
 LIGHT_GRAY = "\033[90m"
+CLEAR = "\033[2J\033[H"
+
+
+def _clear_screen() -> None:
+    print(CLEAR, end="")
 
 
 def _print_title() -> None:
@@ -92,8 +97,12 @@ def _parse_value(raw: str) -> Any:
 
 def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
     config = _load_config(config_path)
+    dirty_logger: set[str] = set()
+    dirty_tcp_server: set[str] = set()
+    dirty_tcp_client: set[str] = set()
 
     while True:
+        _clear_screen()
         if start_section == "logger":
             choice = "2"
         elif start_section == "tcp_server":
@@ -115,6 +124,7 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
         elif choice in {"2", "3", "3_server", "3_client"}:
             if choice == "2":
                 section_key = "agi_logger.logger"
+                current_section = "logger"
                 section = config
                 for part in section_key.split("."):
                     section = section.get(part, {}) if isinstance(section, dict) else {}
@@ -129,6 +139,7 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
                     if mode_choice not in {"server", "client"}:
                         print(f"{RED}Invalid selection{RESET}")
                         continue
+                current_section = f"tcp_{mode_choice}"
                 section_key = f"agi_logger.tcp_file_communication.{mode_choice}"
                 section = config
                 for part in section_key.split("."):
@@ -150,6 +161,21 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
                 f"{BOLD}Select number to edit{RESET} (or press Enter to go back): "
             ).strip()
             if not raw_index:
+                if current_section == "logger":
+                    if _prompt_record_after_settings(config_path, dirty_logger):
+                        start_section = "logger"
+                        continue
+                    return
+                if current_section == "tcp_server":
+                    if _prompt_tcp_after_settings(config_path, "server", dirty_tcp_server):
+                        start_section = "tcp_server"
+                        continue
+                    return
+                if current_section == "tcp_client":
+                    if _prompt_tcp_after_settings(config_path, "client", dirty_tcp_client):
+                        start_section = "tcp_client"
+                        continue
+                    return
                 return
             if not raw_index.isdigit():
                 print(f"{RED}Invalid selection{RESET}")
@@ -165,12 +191,52 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
             value = input("Enter new value (press Enter to keep current): ").strip()
             if value == "":
                 print(f"{YELLOW}No change{RESET}")
+                if current_section == "logger":
+                    if _prompt_record_after_settings(config_path, dirty_logger):
+                        start_section = "logger"
+                        continue
+                    return
+                if current_section == "tcp_server":
+                    if _prompt_tcp_after_settings(config_path, "server", dirty_tcp_server):
+                        start_section = "tcp_server"
+                        continue
+                    return
+                if current_section == "tcp_client":
+                    if _prompt_tcp_after_settings(config_path, "client", dirty_tcp_client):
+                        start_section = "tcp_client"
+                        continue
+                    return
                 continue
             update_nested_value(config, full_key, _parse_value(value))
             print(f"{GREEN}Value updated{RESET}")
+            updated_key = full_key.split(".")[-1]
+            if current_section == "logger":
+                dirty_logger.add(updated_key)
+            elif current_section == "tcp_server":
+                dirty_tcp_server.add(updated_key)
+            elif current_section == "tcp_client":
+                dirty_tcp_client.add(updated_key)
+            if current_section == "logger":
+                if _prompt_record_after_settings(config_path, dirty_logger):
+                    start_section = "logger"
+                    continue
+                return
+            if current_section == "tcp_server":
+                if _prompt_tcp_after_settings(config_path, "server", dirty_tcp_server):
+                    start_section = "tcp_server"
+                    continue
+                return
+            if current_section == "tcp_client":
+                if _prompt_tcp_after_settings(config_path, "client", dirty_tcp_client):
+                    start_section = "tcp_client"
+                    continue
+                return
         elif choice == "4":
             save_raw_config(config, config_path)
             print(f"{GREEN}Saved to {config_path}{RESET}")
+            dirty_logger.clear()
+            dirty_tcp_server.clear()
+            dirty_tcp_client.clear()
         elif choice == "5":
             return
         else:
@@ -187,6 +253,7 @@ def _record_start(args: argparse.Namespace) -> int:
 
 
 def _record_preview(args: argparse.Namespace) -> int:
+    _clear_screen()
     config = _load_config(args.config)
     logger_cfg = config.get("agi_logger", {}).get("logger", {})
     print(f"\n{BOLD}{CYAN}Record settings preview{RESET}")
@@ -205,6 +272,66 @@ def _record_preview(args: argparse.Namespace) -> int:
         args = build_parser().parse_args(["--config", str(args.config), "record", "start"])
         return args.func(args)
     return 0
+
+
+def _prompt_record_after_settings(config_path: Path, highlight_keys: set[str] | None = None) -> bool:
+    _clear_screen()
+    config = _load_config(config_path)
+    logger_cfg = config.get("agi_logger", {}).get("logger", {})
+    print(f"\n{BOLD}{CYAN}Record settings preview{RESET}")
+    for key, value in logger_cfg.items():
+        color = YELLOW if highlight_keys and key in highlight_keys else LIGHT_GRAY
+        print(f"{CYAN}- {key}{RESET}: {color}{value}{RESET}")
+    action = input(
+        f"{BOLD}Continue recording?{RESET} [Enter = start / e = edit / a = autostart / s = save / n = back]: "
+    ).strip().lower()
+    if action == "e":
+        return True
+    if action == "s":
+        save_raw_config(config, config_path)
+        if highlight_keys is not None:
+            highlight_keys.clear()
+        print(f"{GREEN}Settings saved{RESET}")
+        return True
+    if action == "a":
+        save_raw_config(config, config_path)
+        if highlight_keys is not None:
+            highlight_keys.clear()
+        print(f"{GREEN}Settings saved{RESET}")
+        args = build_parser().parse_args(["--config", str(config_path), "ros2", "autostart"])
+        args.func(args)
+        return False
+    if action in {"", "y"}:
+        save_raw_config(config, config_path)
+        if highlight_keys is not None:
+            highlight_keys.clear()
+        print(f"{GREEN}Settings saved{RESET}")
+        args = build_parser().parse_args(["--config", str(config_path), "record", "start"])
+        args.func(args)
+    return False
+
+
+def _prompt_tcp_after_settings(
+    config_path: Path, mode: str, highlight_keys: set[str] | None = None
+) -> bool:
+    _clear_screen()
+    config = _load_config(config_path)
+    tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
+    mode_cfg = tcp_cfg.get(mode, {})
+    print(f"\n{BOLD}{CYAN}TCP {mode} settings preview{RESET}")
+    for key, value in mode_cfg.items():
+        color = YELLOW if highlight_keys and key in highlight_keys else LIGHT_GRAY
+        print(f"{CYAN}- {key}{RESET}: {color}{value}{RESET}")
+    action = input(
+        f"{BOLD}Continue transfer?{RESET} [Enter = start / e = edit / n = back]: "
+    ).strip().lower()
+    if action == "e":
+        return True
+    if action in {"", "y"}:
+        cmd = "send" if mode == "server" else "receive"
+        args = build_parser().parse_args(["--config", str(config_path), "tcp", cmd])
+        args.func(args)
+    return False
 
 
 def _record_stop(args: argparse.Namespace) -> int:
@@ -311,6 +438,7 @@ def _run_command(cmd: list[str]) -> int:
 
 
 def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int:
+    _clear_screen()
     _print_title()
     print(f"{GREEN}1){RESET} Record")
     print(f"{GREEN}2){RESET} Transfer")

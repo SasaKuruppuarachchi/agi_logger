@@ -14,7 +14,7 @@ agi_logger:
     - /drone1/RealSense_Camera/color/image_raw
     - /tf
     - /tf_static
-    name: agi_test_log
+    name: test_log
     max_bag_size: 1
     override_qos: false
     qos_settings: cfg/qos_profiles.yaml
