@@ -113,11 +113,11 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
     while True:
         _clear_screen()
         if start_section == "logger":
-            choice = "2"
+            choice = "1"
         elif start_section == "tcp_server":
-            choice = "3_server"
+            choice = "2_server"
         elif start_section == "tcp_client":
-            choice = "3_client"
+            choice = "2_client"
         else:
             print(f"\n{BOLD}{CYAN}Settings menu{RESET}")
             print(f"{GREEN}1){RESET} Edit logger settings")

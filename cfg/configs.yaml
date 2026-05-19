@@ -6,12 +6,19 @@ agi_logger:
     - /clock
     - /fmu/out/vehicle_control_mode
     - /fmu/out/vehicle_status
-    - /occupancy_map/inflated_voxel_map
+    - /drone0/RealSense_Camera/color/camera_info
+    - /drone0/RealSense_Camera/color/image_raw
+    - /drone0/RealSense_Camera/depth
+    - /drone0/alert_event
+    - /drone0/dynamic_map/voxel_map
+    - /drone0/fast_lio/Laser_map
+    - /drone0/fast_lio/imu_odometry
+    - /drone0/livox/lidar
+    - /drone0/livox/imu
     - /drone0/self_localization/pose
-    - /navigation_runner/goal
+    - /drone0/sensor_measurements/imu
+    - /drone0/navigation_runner/goal
     - /drone0/self_localization/path
-    - /offboard_velocity_cmd
-    - /drone1/RealSense_Camera/color/image_raw
     - /tf
     - /tf_static
     name: test_log
