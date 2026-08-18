@@ -1,16 +1,36 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 try:
     import rclpy
     from rclpy.node import Node
-    from px4_msgs.msg import VehicleStatus
+    from rclpy.qos import (
+        DurabilityPolicy,
+        HistoryPolicy,
+        QoSProfile,
+        ReliabilityPolicy,
+    )
 except ImportError as exc:  # pragma: no cover - optional dependency
     raise RuntimeError(
-        "ROS 2 dependencies not available. Ensure rclpy and px4_msgs are installed."
+        "ROS 2 dependencies not available. Ensure rclpy is installed."
     ) from exc
+
+try:
+    from px4_msgs.msg import VehicleStatus
+except ImportError:
+    VehicleStatus = None
+
+try:
+    from as2_msgs.msg import PlatformInfo
+except ImportError:
+    PlatformInfo = None
+
+if VehicleStatus is None and PlatformInfo is None:
+    raise RuntimeError(
+        "Neither px4_msgs nor as2_msgs are available in the current ROS 2 environment."
+    )
 
 from .config import load_raw_config
 from .logging_manager import RecorderManager
@@ -25,41 +45,134 @@ class AutoStartLoggerNode(Node):
         self._auto_start = bool(self._logger_cfg.get("auto_start", False))
         self._behavior = str(self._logger_cfg.get("auto_start_behavior", "toggle_arm"))
         self._manager = RecorderManager(self._config, config_path)
-        self._last_arming_state = None
+        self._last_armed_state: Optional[bool] = None
+        self._received_first_msg = False
 
-        topic = str(self._logger_cfg.get("auto_start_topic", "/fmu/out/vehicle_status"))
-        self._sub = self.create_subscription(
-            VehicleStatus,
-            topic,
-            self._on_vehicle_status,
-            10,
+        topic = str(self._logger_cfg.get("auto_start_topic", "/drone0/platform/info"))
+
+        # Best effort QoS profile for high-rate sensor/telemetry compatibility
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
         )
-        self.get_logger().info("AGI logger autostart node initialized")
 
-    def _on_vehicle_status(self, msg: VehicleStatus) -> None:
+        # Determine message type (PlatformInfo or VehicleStatus)
+        msg_type = None
+        topic_types_dict = dict(self.get_topic_names_and_types())
+
+        if topic in topic_types_dict:
+            types = topic_types_dict[topic]
+            if any("PlatformInfo" in t for t in types) and PlatformInfo is not None:
+                msg_type = PlatformInfo
+            elif any("VehicleStatus" in t for t in types) and VehicleStatus is not None:
+                msg_type = VehicleStatus
+
+        if msg_type is None:
+            if ("platform" in topic or "info" in topic) and PlatformInfo is not None:
+                msg_type = PlatformInfo
+            elif VehicleStatus is not None:
+                msg_type = VehicleStatus
+            elif PlatformInfo is not None:
+                msg_type = PlatformInfo
+
+        self._sub = self.create_subscription(
+            msg_type,
+            topic,
+            self._on_status_msg,
+            qos_profile,
+        )
+
+        self.get_logger().info(
+            f"AGI logger autostart node initialized on topic '{topic}' [{msg_type.__name__}] "
+            f"(auto_start={self._auto_start}, behavior={self._behavior})"
+        )
+        if not self._auto_start:
+            self.get_logger().warn(
+                "auto_start is set to false in configs.yaml. Recording will NOT trigger on arming."
+            )
+
+    def _on_status_msg(self, msg: Any) -> None:
+        if hasattr(msg, "armed"):
+            # as2_msgs/msg/PlatformInfo
+            armed = bool(msg.armed)
+            state_info = f"armed={armed}, connected={getattr(msg, 'connected', True)}"
+        elif hasattr(msg, "arming_state"):
+            # px4_msgs/msg/VehicleStatus
+            armed_constant = getattr(VehicleStatus, "ARMING_STATE_ARMED", 2)
+            armed = (msg.arming_state == armed_constant)
+            state_info = f"arming_state={msg.arming_state} (armed={armed})"
+        else:
+            armed = False
+            state_info = str(msg)
+
+        if not self._received_first_msg:
+            self._received_first_msg = True
+            self.get_logger().info(f"Connected to telemetry stream. Initial state: {state_info}")
+
         if not self._auto_start:
             return
 
-        armed = msg.arming_state == msg.ARMING_STATE_ARMED
-        if self._behavior == "toggle_arm":
-            if self._last_arming_state is None:
-                self._last_arming_state = msg.arming_state
-                return
-            if not self._manager.is_recording() and armed and self._last_arming_state != msg.arming_state:
-                self.get_logger().info("Vehicle armed: starting bag recording")
-                try:
-                    self._manager.start_recording()
-                except Exception as exc:  # pragma: no cover
-                    self.get_logger().error(f"Failed to start recording: {exc}")
-        else:
-            if armed and not self._manager.is_recording():
-                self.get_logger().info("Vehicle armed: starting bag recording")
-                try:
-                    self._manager.start_recording()
-                except Exception as exc:  # pragma: no cover
-                    self.get_logger().error(f"Failed to start recording: {exc}")
+        if self._last_armed_state is not None and self._last_armed_state != armed:
+            self.get_logger().info(f"Arming transition: {self._last_armed_state} -> {armed} ({state_info})")
 
-        self._last_arming_state = msg.arming_state
+        if self._behavior == "toggle_arm":
+            if self._last_armed_state is None:
+                self._last_armed_state = armed
+                # If already armed at startup, start recording
+                if armed and not self._manager.is_recording():
+                    self.get_logger().info("Vehicle is currently armed: starting bag recording (background)")
+                    try:
+                        state = self._manager.start_recording(foreground=False, verbose=True)
+                        self.get_logger().info(f"Recording active: {state.bag_name} (PID {state.pid})")
+                    except Exception as exc:
+                        self.get_logger().error(f"Failed to start recording: {exc}")
+                return
+
+            if armed and not self._last_armed_state:
+                if not self._manager.is_recording():
+                    self.get_logger().info("Vehicle armed: starting bag recording (background)")
+                    try:
+                        state = self._manager.start_recording(foreground=False, verbose=True)
+                        self.get_logger().info(f"Recording active: {state.bag_name} (PID {state.pid})")
+                    except Exception as exc:
+                        self.get_logger().error(f"Failed to start recording: {exc}")
+            elif not armed and self._last_armed_state:
+                if self._manager.is_recording():
+                    self.get_logger().info("Vehicle disarmed: stopping bag recording")
+                    try:
+                        self._manager.stop_recording()
+                        self.get_logger().info("Recording stopped successfully.")
+                    except Exception as exc:
+                        self.get_logger().error(f"Failed to stop recording: {exc}")
+        else:
+            if armed:
+                if not self._manager.is_recording():
+                    self.get_logger().info("Vehicle armed: starting bag recording (background)")
+                    try:
+                        state = self._manager.start_recording(foreground=False, verbose=True)
+                        self.get_logger().info(f"Recording active: {state.bag_name} (PID {state.pid})")
+                    except Exception as exc:
+                        self.get_logger().error(f"Failed to start recording: {exc}")
+            else:
+                if self._manager.is_recording():
+                    self.get_logger().info("Vehicle not armed: stopping bag recording")
+                    try:
+                        self._manager.stop_recording()
+                        self.get_logger().info("Recording stopped successfully.")
+                    except Exception as exc:
+                        self.get_logger().error(f"Failed to stop recording: {exc}")
+
+        self._last_armed_state = armed
+
+    def shutdown(self) -> None:
+        if self._manager.is_recording():
+            self.get_logger().info("Shutting down autostart node: stopping active recording")
+            try:
+                self._manager.stop_recording()
+            except Exception:
+                pass
 
 
 def run_autostart_node(config_path: Path) -> None:
@@ -70,5 +183,6 @@ def run_autostart_node(config_path: Path) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        node.shutdown()
         node.destroy_node()
         rclpy.shutdown()

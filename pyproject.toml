@@ -16,3 +16,6 @@ packages = ["agi_logger"]
 
 [project.scripts]
 agi-logger = "agi_logger.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

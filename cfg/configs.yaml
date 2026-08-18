@@ -1,7 +1,7 @@
 agi_logger:
   verbosity: INFO
   logger:
-    bag_path: /workspaces/logging/bags
+    bag_path: /workspaces/logging/test_bags
     topics:
     - /clock
     - /fmu/out/vehicle_control_mode
@@ -25,12 +25,12 @@ agi_logger:
     max_bag_size: 1
     override_qos: false
     qos_settings: cfg/qos_profiles.yaml
-    compress: false
+    compress: true
     duration: 10
     mcap: true
     auto_start: true
     auto_start_behavior: toggle_arm
-    auto_start_topic: /fmu/out/vehicle_status
+    auto_start_topic: /drone0/platform/info
   tcp_file_communication:
     mode: ask
     server:

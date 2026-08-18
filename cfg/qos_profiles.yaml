@@ -1,0 +1,56 @@
+# ROS 2 QoS Profile Overrides for agi_logger
+# Used when override_qos is set to true in configs.yaml
+
+/fmu/out/vehicle_status:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+
+/fmu/out/vehicle_control_mode:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+
+/drone0/sensor_measurements/imu:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+
+/drone0/livox/lidar:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 5
+
+/drone0/livox/imu:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+
+/drone0/RealSense_Camera/color/image_raw:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 5
+
+/drone0/RealSense_Camera/depth:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 5
+
+/tf:
+  reliability: reliable
+  durability: volatile
+  history: keep_last
+  depth: 100
+
+/tf_static:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 100

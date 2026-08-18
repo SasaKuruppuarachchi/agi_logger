@@ -36,7 +36,7 @@ class RecorderManager:
 
     def is_recording(self) -> bool:
         state = self._read_state()
-        if not state:
+        if not state or state.pid <= 0:
             return False
         try:
             os.kill(state.pid, 0)
@@ -99,7 +99,13 @@ class RecorderManager:
             self._write_metadata(state)
             return state
 
-        process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
         state = RecordingState(
             pid=process.pid,
             bag_name=bag_name,
@@ -129,7 +135,11 @@ class RecorderManager:
             raise RuntimeError("No active recording found")
 
         try:
-            os.kill(state.pid, signal.SIGINT)
+            try:
+                pgid = os.getpgid(state.pid)
+                os.killpg(pgid, signal.SIGINT)
+            except (ProcessLookupError, PermissionError):
+                os.kill(state.pid, signal.SIGINT)
         except OSError:
             self._clear_state()
             return
@@ -138,6 +148,12 @@ class RecorderManager:
             if not self.is_recording():
                 break
             time.sleep(0.5)
+        else:
+            try:
+                pgid = os.getpgid(state.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
 
         self._write_metadata(state)
         self._clear_state()
@@ -146,11 +162,23 @@ class RecorderManager:
         return self._read_state()
 
     def _build_command(self, full_bag_path: str) -> List[str]:
-        topics = self._logger_cfg.get("topics", [])
+        raw_topics = self._logger_cfg.get("topics", [])
+        if isinstance(raw_topics, str):
+            topics = [t.strip() for t in raw_topics.split(",") if t.strip()]
+        elif isinstance(raw_topics, (list, tuple)):
+            topics = [str(t).strip() for t in raw_topics if str(t).strip()]
+        else:
+            topics = []
+
         if not topics:
             raise RuntimeError("No topics configured for recording")
 
         cmd = ["ros2", "bag", "record", "-o", full_bag_path]
+
+        duration_min = float(self._logger_cfg.get("duration", 0) or 0)
+        if duration_min > 0:
+            duration_sec = int(duration_min * 60)
+            cmd += ["-d", str(duration_sec)]
 
         if bool(self._logger_cfg.get("mcap", False)):
             cmd += ["--storage", "mcap"]
@@ -159,8 +187,10 @@ class RecorderManager:
 
         if bool(self._logger_cfg.get("override_qos", False)):
             qos_file = self._logger_cfg.get("qos_settings")
-            if qos_file and Path(qos_file).exists():
-                cmd += ["--qos-profile-overrides-path", qos_file]
+            if qos_file:
+                qos_path = Path(qos_file)
+                if qos_path.exists() and qos_path.stat().st_size > 0:
+                    cmd += ["--qos-profile-overrides-path", str(qos_path)]
 
         max_bag_size = float(self._logger_cfg.get("max_bag_size", 0) or 0)
         if max_bag_size > 0:

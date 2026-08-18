@@ -13,3 +13,7 @@ agi_logger.egg-info/dependency_links.txt
 agi_logger.egg-info/entry_points.txt
 agi_logger.egg-info/requires.txt
 agi_logger.egg-info/top_level.txt
+tests/test_cli_helpers.py
+tests/test_config.py
+tests/test_logging_manager.py
+tests/test_tcp_transfer.py

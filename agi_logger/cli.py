@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import argparse
-import os
 import curses
+import getpass
+import os
+import pty
 import select
-import sys
-import termios
-import tty
 import signal
 import subprocess
-import pty
+import sys
+import termios
+import time
+import tty
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -77,7 +79,7 @@ def _print_status(manager: RecorderManager) -> int:
     state = manager.status()
     if not state or not manager.is_recording():
         print("Recording inactive")
-        return 1
+        return 0
     print("Recording active")
     print(f"Bag name: {state.bag_name}")
     print(f"Bag path: {state.bag_path}")
@@ -90,25 +92,47 @@ def _tcp_allowed(manager: RecorderManager) -> None:
         raise RuntimeError("TCP transfer disabled while logging is active")
 
 
-def _parse_value(raw: str) -> Any:
-    lowered = raw.lower()
-    if lowered in {"true", "false"}:
-        return lowered == "true"
-    if lowered in {"null", "none"}:
+def _parse_value(raw: str, existing_value: Any = None) -> Any:
+    trimmed = raw.strip()
+    lowered = trimmed.lower()
+    if lowered in {"true", "yes", "on"}:
+        return True
+    if lowered in {"false", "no", "off"}:
+        return False
+    if lowered in {"null", "none", "~"}:
         return None
+
+    # If the setting is a list or formatted as a list
+    if isinstance(existing_value, list) or (trimmed.startswith("[") and trimmed.endswith("]")):
+        try:
+            parsed = yaml.safe_load(trimmed)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+        return [item.strip() for item in trimmed.strip("[]").split(",") if item.strip()]
+
     try:
-        if "." in raw:
-            return float(raw)
-        return int(raw)
+        if "." in trimmed:
+            return float(trimmed)
+        return int(trimmed)
     except ValueError:
-        return raw
+        return trimmed
+
+
+def _format_display_value(value: Any) -> str:
+    if isinstance(value, list):
+        if len(value) <= 3:
+            return f"[{', '.join(str(v) for v in value)}]"
+        return f"[{len(value)} items: {', '.join(str(v) for v in value[:2])}, ...]"
+    return str(value)
 
 
 def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
     config = _load_config(config_path)
-    dirty_logger: set[str] = set()
-    dirty_tcp_server: set[str] = set()
-    dirty_tcp_client: set[str] = set()
+    dirty_keys: Set[str] = set()
+
+    is_shortcut_flow = start_section is not None
 
     while True:
         _clear_screen()
@@ -119,10 +143,10 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
         elif start_section == "tcp_client":
             choice = "2_client"
         else:
-            print(f"\n{BOLD}{CYAN}Settings menu{RESET}")
+            print(f"\n{BOLD}{CYAN}Settings Menu{RESET}")
             print(f"{GREEN}1){RESET} Edit logger settings")
             print(f"{GREEN}2){RESET} Edit TCP transfer settings")
-            print(f"{GREEN}3){RESET} Save")
+            print(f"{GREEN}3){RESET} Save configuration")
             print(f"{GREEN}4){RESET} Back")
             choice = input(f"{BOLD}Select option:{RESET} ").strip()
 
@@ -143,6 +167,7 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
                     ).strip().lower()
                     if mode_choice not in {"server", "client"}:
                         print(f"{RED}Invalid selection{RESET}")
+                        time.sleep(1)
                         continue
                 current_section = f"tcp_{mode_choice}"
                 section_key = f"agi_logger.tcp_file_communication.{mode_choice}"
@@ -150,102 +175,100 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
                 for part in section_key.split("."):
                     section = section.get(part, {}) if isinstance(section, dict) else {}
                 entries = list(iter_nested_keys(section, section_key))
+
             if not entries:
-                print("No editable keys found")
-                continue
-            print(f"{BOLD}Available keys:{RESET}")
-            display_entries = []
-            for full_key, value in entries:
-                display_name = full_key.split(".")[-1]
-                display_entries.append((display_name, full_key, value))
-            for idx, (display_name, _, value) in enumerate(display_entries, start=1):
-                print(
-                    f"{CYAN}{idx}){RESET} {display_name} = {LIGHT_GRAY}{value}{RESET}"
-                )
-            raw_index = input(
-                f"{BOLD}Select number to edit{RESET} (or press Enter to go back): "
-            ).strip()
-            if not raw_index:
-                if current_section == "logger":
-                    if _prompt_record_after_settings(config_path, dirty_logger):
-                        start_section = "logger"
-                        continue
-                    return
-                if current_section == "tcp_server":
-                    if _prompt_tcp_after_settings(config_path, "server", dirty_tcp_server):
-                        start_section = "tcp_server"
-                        continue
-                    return
-                if current_section == "tcp_client":
-                    if _prompt_tcp_after_settings(config_path, "client", dirty_tcp_client):
-                        start_section = "tcp_client"
-                        continue
-                    return
-                return
-            if not raw_index.isdigit():
-                print(f"{RED}Invalid selection{RESET}")
-                continue
-            index = int(raw_index)
-            if index < 1 or index > len(display_entries):
-                print(f"{RED}Selection out of range{RESET}")
-                continue
-            display_name, full_key, current_value = display_entries[index - 1]
-            print(
-                f"{YELLOW}Editing{RESET} {display_name} (current: {current_value})"
-            )
-            value = input("Enter new value (press Enter to keep current): ").strip()
-            if value == "":
-                print(f"{YELLOW}No change{RESET}")
-                if current_section == "logger":
-                    if _prompt_record_after_settings(config_path, dirty_logger):
-                        start_section = "logger"
-                        continue
-                    return
-                if current_section == "tcp_server":
-                    if _prompt_tcp_after_settings(config_path, "server", dirty_tcp_server):
-                        start_section = "tcp_server"
-                        continue
-                    return
-                if current_section == "tcp_client":
-                    if _prompt_tcp_after_settings(config_path, "client", dirty_tcp_client):
-                        start_section = "tcp_client"
-                        continue
+                print("No editable keys found in section")
+                time.sleep(1)
+                if is_shortcut_flow:
                     return
                 continue
-            update_nested_value(config, full_key, _parse_value(value))
-            print(f"{GREEN}Value updated{RESET}")
-            updated_key = full_key.split(".")[-1]
-            if current_section == "logger":
-                dirty_logger.add(updated_key)
-            elif current_section == "tcp_server":
-                dirty_tcp_server.add(updated_key)
-            elif current_section == "tcp_client":
-                dirty_tcp_client.add(updated_key)
-            if current_section == "logger":
-                if _prompt_record_after_settings(config_path, dirty_logger):
-                    start_section = "logger"
+
+            while True:
+                _clear_screen()
+                section_title = current_section.replace("_", " ").title()
+                print(f"\n{BOLD}{CYAN}{section_title} Settings:{RESET}")
+                display_entries = []
+                for full_key, value in entries:
+                    display_name = full_key.split(".")[-1]
+                    display_entries.append((display_name, full_key, value))
+
+                for idx, (display_name, full_key, value) in enumerate(display_entries, start=1):
+                    val_str = _format_display_value(value)
+                    color = YELLOW if full_key in dirty_keys else LIGHT_GRAY
+                    print(f"{CYAN}{idx:2d}){RESET} {display_name:<20} = {color}{val_str}{RESET}")
+
+                print(f"\n{LIGHT_GRAY}Press Enter to go back to the previous menu.{RESET}")
+                raw_index = input(f"{BOLD}Select number to edit:{RESET} ").strip()
+
+                if not raw_index:
+                    if is_shortcut_flow:
+                        if current_section == "logger":
+                            _prompt_record_after_settings(config_path, config, dirty_keys)
+                        elif current_section == "tcp_server":
+                            _prompt_tcp_after_settings(config_path, config, "server", dirty_keys)
+                        elif current_section == "tcp_client":
+                            _prompt_tcp_after_settings(config_path, config, "client", dirty_keys)
+                        return
+                    break
+
+                if not raw_index.isdigit():
+                    print(f"{RED}Invalid selection{RESET}")
+                    time.sleep(0.8)
                     continue
-                return
-            if current_section == "tcp_server":
-                if _prompt_tcp_after_settings(config_path, "server", dirty_tcp_server):
-                    start_section = "tcp_server"
+
+                index = int(raw_index)
+                if index < 1 or index > len(display_entries):
+                    print(f"{RED}Selection out of range{RESET}")
+                    time.sleep(0.8)
                     continue
-                return
-            if current_section == "tcp_client":
-                if _prompt_tcp_after_settings(config_path, "client", dirty_tcp_client):
-                    start_section = "tcp_client"
+
+                display_name, full_key, current_value = display_entries[index - 1]
+                print(f"\n{YELLOW}Editing{RESET} {BOLD}{display_name}{RESET}")
+                if isinstance(current_value, list):
+                    print(f"{LIGHT_GRAY}Current list ({len(current_value)} items):{RESET}")
+                    for item in current_value:
+                        print(f"  - {item}")
+                    print(f"{LIGHT_GRAY}(Enter items separated by comma or YAML list format){RESET}")
+                else:
+                    print(f"Current value: {LIGHT_GRAY}{current_value}{RESET}")
+
+                new_val_str = input("Enter new value (press Enter to keep current): ").strip()
+                if new_val_str == "":
+                    print(f"{YELLOW}No change made.{RESET}")
+                    time.sleep(0.5)
                     continue
+
+                parsed = _parse_value(new_val_str, existing_value=current_value)
+                update_nested_value(config, full_key, parsed)
+                dirty_keys.add(full_key)
+
+                # Refresh entries with updated values
+                section = config
+                for part in section_key.split("."):
+                    section = section.get(part, {}) if isinstance(section, dict) else {}
+                entries = list(iter_nested_keys(section, section_key))
+                print(f"{GREEN}Value updated successfully.{RESET}")
+                time.sleep(0.5)
+
+            if is_shortcut_flow:
                 return
+
         elif choice == "3":
             save_raw_config(config, config_path)
-            print(f"{GREEN}Saved to {config_path}{RESET}")
-            dirty_logger.clear()
-            dirty_tcp_server.clear()
-            dirty_tcp_client.clear()
+            dirty_keys.clear()
+            print(f"{GREEN}Saved changes to {config_path}{RESET}")
+            time.sleep(1)
         elif choice == "4":
+            if dirty_keys:
+                save_prompt = input(f"{YELLOW}You have unsaved changes. Save before returning? [Y/n]:{RESET} ").strip().lower()
+                if save_prompt in {"", "y", "yes"}:
+                    save_raw_config(config, config_path)
+                    print(f"{GREEN}Saved changes.{RESET}")
+                    time.sleep(0.8)
             return
         else:
             print(f"{RED}Invalid selection{RESET}")
+            time.sleep(0.8)
 
         start_section = None
 
@@ -261,11 +284,13 @@ def _record_preview(args: argparse.Namespace) -> int:
     _clear_screen()
     config = _load_config(args.config)
     logger_cfg = config.get("agi_logger", {}).get("logger", {})
-    print(f"\n{BOLD}{CYAN}Record settings preview{RESET}")
+    print(f"\n{BOLD}{CYAN}Record Settings Preview{RESET}")
     for key, value in logger_cfg.items():
-        print(f"{CYAN}- {key}{RESET}: {LIGHT_GRAY}{value}{RESET}")
+        val_str = _format_display_value(value)
+        print(f"{CYAN}- {key:<20}{RESET}: {LIGHT_GRAY}{val_str}{RESET}")
+
     action = input(
-        f"{BOLD}Continue recording?{RESET} [Enter = start / e = edit / a = autostart / n = cancel]: "
+        f"\n{BOLD}Action:{RESET} [Enter = Start / e = Edit / a = Autostart node / n = Cancel]: "
     ).strip().lower()
     if action == "e":
         _settings_menu(args.config, start_section="logger")
@@ -273,66 +298,81 @@ def _record_preview(args: argparse.Namespace) -> int:
     if action == "a":
         args = build_parser().parse_args(["--config", str(args.config), "ros2", "autostart"])
         return args.func(args)
-    if action in {"", "y"}:
+    if action in {"", "y", "start"}:
         args = build_parser().parse_args(["--config", str(args.config), "record", "start"])
         return args.func(args)
     return 0
 
 
-def _prompt_record_after_settings(config_path: Path, highlight_keys: set[str] | None = None) -> bool:
+def _prompt_record_after_settings(
+    config_path: Path, config: Dict[str, Any], highlight_keys: Set[str] | None = None
+) -> bool:
     _clear_screen()
-    config = _load_config(config_path)
     logger_cfg = config.get("agi_logger", {}).get("logger", {})
-    print(f"\n{BOLD}{CYAN}Record settings preview{RESET}")
+    print(f"\n{BOLD}{CYAN}Record Settings Preview{RESET}")
     for key, value in logger_cfg.items():
-        color = YELLOW if highlight_keys and key in highlight_keys else LIGHT_GRAY
-        print(f"{CYAN}- {key}{RESET}: {color}{value}{RESET}")
+        val_str = _format_display_value(value)
+        full_key = f"agi_logger.logger.{key}"
+        color = YELLOW if highlight_keys and full_key in highlight_keys else LIGHT_GRAY
+        print(f"{CYAN}- {key:<20}{RESET}: {color}{val_str}{RESET}")
+
     action = input(
-        f"{BOLD}Continue recording?{RESET} [Enter = start / e = edit / a = autostart / s = save / n = back]: "
+        f"\n{BOLD}Continue?{RESET} [Enter = Start Recording / e = Edit / a = Autostart node / s = Save & Return / n = Discard]: "
     ).strip().lower()
     if action == "e":
+        _settings_menu(config_path, start_section="logger")
         return True
     if action == "s":
         save_raw_config(config, config_path)
         if highlight_keys is not None:
             highlight_keys.clear()
-        print(f"{GREEN}Settings saved{RESET}")
-        return True
+        print(f"{GREEN}Settings saved.{RESET}")
+        time.sleep(1)
+        return False
     if action == "a":
         save_raw_config(config, config_path)
         if highlight_keys is not None:
             highlight_keys.clear()
-        print(f"{GREEN}Settings saved{RESET}")
         args = build_parser().parse_args(["--config", str(config_path), "ros2", "autostart"])
         args.func(args)
         return False
-    if action in {"", "y"}:
+    if action in {"", "y", "start"}:
         save_raw_config(config, config_path)
         if highlight_keys is not None:
             highlight_keys.clear()
-        print(f"{GREEN}Settings saved{RESET}")
         args = build_parser().parse_args(["--config", str(config_path), "record", "start"])
         args.func(args)
     return False
 
 
 def _prompt_tcp_after_settings(
-    config_path: Path, mode: str, highlight_keys: set[str] | None = None
+    config_path: Path, config: Dict[str, Any], mode: str, highlight_keys: Set[str] | None = None
 ) -> bool:
     _clear_screen()
-    config = _load_config(config_path)
     tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
     mode_cfg = tcp_cfg.get(mode, {})
-    print(f"\n{BOLD}{CYAN}TCP {mode} settings preview{RESET}")
+    print(f"\n{BOLD}{CYAN}TCP {mode.title()} Settings Preview{RESET}")
     for key, value in mode_cfg.items():
-        color = YELLOW if highlight_keys and key in highlight_keys else LIGHT_GRAY
-        print(f"{CYAN}- {key}{RESET}: {color}{value}{RESET}")
+        val_str = _format_display_value(value)
+        full_key = f"agi_logger.tcp_file_communication.{mode}.{key}"
+        color = YELLOW if highlight_keys and full_key in highlight_keys else LIGHT_GRAY
+        print(f"{CYAN}- {key:<20}{RESET}: {color}{val_str}{RESET}")
+
     action = input(
-        f"{BOLD}Continue transfer?{RESET} [Enter = start / e = edit / n = back]: "
+        f"\n{BOLD}Continue?{RESET} [Enter = Start Transfer / e = Edit / s = Save & Return / n = Back]: "
     ).strip().lower()
     if action == "e":
+        _settings_menu(config_path, start_section=f"tcp_{mode}")
         return True
-    if action in {"", "y"}:
+    if action == "s":
+        save_raw_config(config, config_path)
+        if highlight_keys is not None:
+            highlight_keys.clear()
+        print(f"{GREEN}Settings saved.{RESET}")
+        time.sleep(1)
+        return False
+    if action in {"", "y", "start"}:
+        save_raw_config(config, config_path)
         cmd = "send" if mode == "server" else "receive"
         args = build_parser().parse_args(["--config", str(config_path), "tcp", cmd])
         args.func(args)
@@ -342,7 +382,7 @@ def _prompt_tcp_after_settings(
 def _record_stop(args: argparse.Namespace) -> int:
     manager = _get_manager(args.config)
     manager.stop_recording()
-    print("Recording stopped")
+    print("Recording stopped successfully.")
     return 0
 
 
@@ -371,11 +411,11 @@ def _tcp_send(args: argparse.Namespace) -> int:
 
     server = TcpServerConfig(
         host=args.host or server_cfg.get("host", "0.0.0.0"),
-        port=args.port or server_cfg.get("port", 6000),
+        port=args.port or int(server_cfg.get("port", 6000)),
         file_path=args.file or server_cfg.get("file_path", ""),
     )
     if not server.file_path:
-        raise RuntimeError("File path is required for TCP send")
+        raise RuntimeError("File path is required for TCP send (configure in settings or pass --file)")
     send_file(server)
     return 0
 
@@ -390,7 +430,7 @@ def _tcp_receive(args: argparse.Namespace) -> int:
 
     client = TcpClientConfig(
         host=args.host or client_cfg.get("host", "localhost"),
-        port=args.port or client_cfg.get("port", 6000),
+        port=args.port or int(client_cfg.get("port", 6000)),
         destination_path=args.dest or client_cfg.get("destination_path", "."),
     )
     receive_file(client)
@@ -431,9 +471,7 @@ def _ros2_autostart(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_command(cmd: list[str]) -> int:
-    import subprocess
-
+def _run_command(cmd: List[str]) -> int:
     try:
         process = subprocess.run(cmd, check=False)
         return process.returncode
@@ -442,22 +480,25 @@ def _run_command(cmd: list[str]) -> int:
         return 1
 
 
-def _list_bag_dirs(path: str) -> list[str]:
+def _list_bag_dirs(path: str) -> List[str]:
     base = Path(path).expanduser()
-    if not base.exists():
+    if not base.exists() or not base.is_dir():
         return []
     return sorted([p.name for p in base.iterdir() if p.is_dir()])
 
 
 def _curses_select(
-    options: list[str],
+    options: List[str],
     title: str,
     hint: str,
     initial_index: int | None = None,
     last_played_index: int | None = None,
-) -> tuple[str, int | None]:
-    def _inner(stdscr: "curses._CursesWindow") -> tuple[str, int | None]:
-        curses.curs_set(0)
+) -> Tuple[str, int | None]:
+    def _inner(stdscr: "curses._CursesWindow") -> Tuple[str, int | None]:
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
         stdscr.nodelay(False)
         stdscr.keypad(True)
 
@@ -467,13 +508,24 @@ def _curses_select(
         while True:
             stdscr.erase()
             height, width = stdscr.getmaxyx()
-            visible = max(1, height - 6)
+            if height < 4 or width < 10:
+                time.sleep(0.1)
+                continue
 
-            stdscr.addstr(0, 0, title[: width - 1])
-            stdscr.addstr(1, 0, hint[: width - 1])
+            visible = max(1, height - 5)
+
+            try:
+                stdscr.addstr(0, 0, title[: width - 1])
+                stdscr.addstr(1, 0, hint[: width - 1])
+            except curses.error:
+                pass
 
             if not options:
-                stdscr.addstr(3, 0, "No bags found.")
+                try:
+                    stdscr.addstr(3, 0, "No bags found in directory."[: width - 1])
+                    stdscr.addstr(4, 0, "Press 'c' to change directory or 'q' to go back."[: width - 1])
+                except curses.error:
+                    pass
             else:
                 if index < offset:
                     offset = index
@@ -488,10 +540,14 @@ def _curses_select(
                     prefix = "* " if last_played_index == opt_index else "  "
                     line = f"{prefix}{label}"
                     y = row + 3
-                    if opt_index == index:
-                        stdscr.addstr(y, 0, line[: width - 1], curses.A_REVERSE)
-                    else:
-                        stdscr.addstr(y, 0, line[: width - 1])
+                    if y < height - 1:
+                        try:
+                            if opt_index == index:
+                                stdscr.addstr(y, 0, line[: width - 1], curses.A_REVERSE)
+                            else:
+                                stdscr.addstr(y, 0, line[: width - 1])
+                        except curses.error:
+                            pass
 
             stdscr.refresh()
             key = stdscr.getch()
@@ -507,13 +563,17 @@ def _curses_select(
                     return "play", index
             elif key in (ord("c"), ord("C")):
                 return "change", None
-            elif key in (ord("q"), 27):
+            elif key in (ord("q"), ord("Q"), 27):
                 return "cancel", None
 
-    return curses.wrapper(_inner)
+    try:
+        return curses.wrapper(_inner)
+    except Exception as exc:
+        print(f"Interactive selector unavailable ({exc}).")
+        return "cancel", None
 
 
-def _run_rosbag_play_with_quit(cmd: list[str]) -> int:
+def _run_rosbag_play_with_quit(cmd: List[str]) -> int:
     try:
         master_fd, slave_fd = pty.openpty()
         process = subprocess.Popen(cmd, stdin=slave_fd)
@@ -530,7 +590,13 @@ def _run_rosbag_play_with_quit(cmd: list[str]) -> int:
         return process.wait()
 
     fd = tty_handle.fileno()
-    old_settings = termios.tcgetattr(fd)
+    try:
+        old_settings = termios.tcgetattr(fd)
+    except termios.error:
+        os.close(master_fd)
+        tty_handle.close()
+        return process.wait()
+
     try:
         tty.setcbreak(fd)
         while process.poll() is None:
@@ -559,16 +625,21 @@ def _play_menu(config_path: Path, initial_path: str | None = None) -> int:
     while True:
         options = _list_bag_dirs(bag_path)
         title = f"Select a bag to play (path: {bag_path})"
-        hint = "UP/DOWN to select, Enter to play, c change dir, q back (during play press q to stop)"
+        hint = "UP/DOWN to select | Enter: play | c: change dir | q: back (press 'q' during play to stop)"
         last_index = options.index(last_played) if last_played in options else None
         action, index = _curses_select(options, title, hint, last_index, last_index)
 
         if action == "cancel":
             return 0
         if action == "change":
-            new_path = input("Enter absolute bag directory path: ").strip()
+            new_path = input("\nEnter absolute bag directory path: ").strip()
             if new_path:
-                bag_path = new_path
+                expanded = str(Path(new_path).expanduser().resolve())
+                if Path(expanded).exists():
+                    bag_path = expanded
+                else:
+                    print(f"{RED}Directory does not exist: {expanded}{RESET}")
+                    time.sleep(1)
             continue
         if action == "play" and index is not None:
             selected = options[index]
@@ -592,7 +663,7 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
         print(f"{GREEN}3){RESET} Play")
         print(f"{GREEN}4){RESET} Settings")
         print(f"{GREEN}5){RESET} Exit")
-        choice = input(f"{BOLD}Select option:{RESET} ").strip()
+        choice = input(f"\n{BOLD}Select option:{RESET} ").strip()
 
         if choice == "1":
             _record_preview(parser.parse_args(["--config", str(config_path), "record"]))
@@ -601,14 +672,16 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
         if choice == "2":
             while True:
                 _clear_screen()
-                print(f"{BOLD}{CYAN}Transfer{RESET}")
-                print(f"{GREEN}1){RESET} Server")
-                print(f"{GREEN}2){RESET} Client")
+                print(f"\n{BOLD}{CYAN}TCP Transfer Menu{RESET}")
+                print(f"{GREEN}1){RESET} Server (Send)")
+                print(f"{GREEN}2){RESET} Client (Receive)")
                 print(f"{GREEN}3){RESET} Back")
-                sub = input(f"{BOLD}Select option:{RESET} ").strip()
+                sub = input(f"\n{BOLD}Select option:{RESET} ").strip()
                 if sub == "3" or sub == "":
                     break
                 if sub not in {"1", "2"}:
+                    print(f"{RED}Invalid selection{RESET}")
+                    time.sleep(0.8)
                     continue
 
                 config = _load_config(config_path)
@@ -617,11 +690,13 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
                 mode_cfg = tcp_cfg.get(mode, {})
 
                 _clear_screen()
-                print(f"\n{BOLD}{CYAN}TCP {mode} settings preview{RESET}")
+                print(f"\n{BOLD}{CYAN}TCP {mode.title()} Settings Preview{RESET}")
                 for key, value in mode_cfg.items():
-                    print(f"{CYAN}- {key}{RESET}: {LIGHT_GRAY}{value}{RESET}")
+                    val_str = _format_display_value(value)
+                    print(f"{CYAN}- {key:<20}{RESET}: {LIGHT_GRAY}{val_str}{RESET}")
+
                 action = input(
-                    f"{BOLD}Continue transfer?{RESET} [Enter = start / e = edit / n = back]: "
+                    f"\n{BOLD}Continue transfer?{RESET} [Enter = Start / e = Edit / n = Back]: "
                 ).strip().lower()
                 if action == "e":
                     _settings_menu(
@@ -629,10 +704,14 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
                         start_section="tcp_server" if mode == "server" else "tcp_client",
                     )
                     continue
-                if action in {"", "y"}:
+                if action in {"", "y", "start"}:
                     cmd = "send" if mode == "server" else "receive"
                     args = parser.parse_args(["--config", str(config_path), "tcp", cmd])
-                    args.func(args)
+                    try:
+                        args.func(args)
+                    except Exception as exc:
+                        print(f"\n{RED}Transfer error: {exc}{RESET}")
+                    input(f"\n{LIGHT_GRAY}Press Enter to continue...{RESET}")
                 continue
 
         if choice == "3":
@@ -645,7 +724,7 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
             args.func(args)
             continue
 
-        if choice == "5":
+        if choice == "5" or choice.lower() in {"q", "exit", "quit"}:
             return 0
 
         continue
@@ -669,7 +748,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_start.add_argument(
         "--background",
         action="store_true",
-        help="Run in background (Ctrl+C not handled; use record stop)",
+        help="Run in background (use 'agi-logger record stop' to terminate)",
     )
     record_start.set_defaults(func=_record_start)
 
@@ -696,20 +775,20 @@ def build_parser() -> argparse.ArgumentParser:
     tcp_parser = subparsers.add_parser("tcp", help="TCP file transfer")
     tcp_sub = tcp_parser.add_subparsers(dest="tcp_cmd", required=True)
 
-    tcp_send = tcp_sub.add_parser("send", help="Send a file over TCP")
-    tcp_send.add_argument("--file", help="File path to send")
-    tcp_send.add_argument("--host", help="Server host")
+    tcp_send = tcp_sub.add_parser("send", help="Send a file or bag directory over TCP")
+    tcp_send.add_argument("--file", help="Path to file or bag directory to send")
+    tcp_send.add_argument("--host", help="Server bind host")
     tcp_send.add_argument("--port", type=int, help="Server port")
     tcp_send.set_defaults(func=_tcp_send)
 
-    tcp_receive = tcp_sub.add_parser("receive", help="Receive a file over TCP")
+    tcp_receive = tcp_sub.add_parser("receive", help="Receive a file or bag directory over TCP")
     tcp_receive.add_argument("--host", help="Server host")
     tcp_receive.add_argument("--port", type=int, help="Server port")
     tcp_receive.add_argument("--dest", help="Destination directory")
     tcp_receive.set_defaults(func=_tcp_receive)
 
     tcp_run = tcp_sub.add_parser("run", help="Use configured TCP mode")
-    tcp_run.add_argument("--file", help="File path to send (server mode)")
+    tcp_run.add_argument("--file", help="File or bag directory path (server mode)")
     tcp_run.add_argument("--host", help="Host override")
     tcp_run.add_argument("--port", type=int, help="Port override")
     tcp_run.add_argument("--dest", help="Destination directory (client mode)")
@@ -737,9 +816,10 @@ def main() -> None:
     try:
         exit_code = args.func(args)
     except (ConfigError, RuntimeError) as exc:
-        print(f"Error: {exc}")
+        print(f"{RED}Error: {exc}{RESET}")
         exit_code = 1
     except KeyboardInterrupt:
+        print("\nInterrupted.")
         exit_code = 130
 
     raise SystemExit(exit_code)
