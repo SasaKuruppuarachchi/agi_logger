@@ -16,4 +16,5 @@ agi_logger.egg-info/top_level.txt
 tests/test_cli_helpers.py
 tests/test_config.py
 tests/test_logging_manager.py
+tests/test_ros2_node.py
 tests/test_tcp_transfer.py

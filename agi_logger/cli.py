@@ -13,7 +13,7 @@ import termios
 import time
 import tty
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
 
@@ -22,6 +22,8 @@ from .config import (
     ConfigError,
     iter_nested_keys,
     load_raw_config,
+    resolve_logger_paths,
+    resolve_tcp_paths,
     save_raw_config,
     update_nested_value,
 )
@@ -102,7 +104,6 @@ def _parse_value(raw: str, existing_value: Any = None) -> Any:
     if lowered in {"null", "none", "~"}:
         return None
 
-    # If the setting is a list or formatted as a list
     if isinstance(existing_value, list) or (trimmed.startswith("[") and trimmed.endswith("]")):
         try:
             parsed = yaml.safe_load(trimmed)
@@ -126,6 +127,24 @@ def _format_display_value(value: Any) -> str:
             return f"[{', '.join(str(v) for v in value)}]"
         return f"[{len(value)} items: {', '.join(str(v) for v in value[:2])}, ...]"
     return str(value)
+
+
+def _get_item_size_str(item_path: Path) -> str:
+    try:
+        if item_path.is_file():
+            size = item_path.stat().st_size
+        elif item_path.is_dir():
+            size = sum(f.stat().st_size for f in item_path.glob("**/*") if f.is_file())
+        else:
+            size = 0
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        elif size < 1024 * 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f} MB"
+        else:
+            return f"{size / (1024 * 1024 * 1024):.2f} GB"
+    except Exception:
+        return "unknown size"
 
 
 def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
@@ -393,12 +412,158 @@ def _record_status(args: argparse.Namespace) -> int:
 
 def _bag_play(args: argparse.Namespace) -> int:
     cmd = ["ros2", "bag", "play", args.bag]
-    if args.rate:
+    if getattr(args, "rate", None):
         cmd += ["--rate", str(args.rate)]
-    if args.loop:
+    if getattr(args, "loop", False):
         cmd += ["--loop"]
+    if getattr(args, "read_ahead_queue_size", None):
+        cmd += ["--read-ahead-queue-size", str(args.read_ahead_queue_size)]
     print("Running: " + " ".join(cmd))
     return _run_command(cmd)
+
+
+def _list_bag_dirs(path: str) -> List[str]:
+    base = Path(path).expanduser().resolve()
+    if not base.exists() or not base.is_dir():
+        return []
+    return sorted([p.name for p in base.iterdir() if p.is_dir()])
+
+
+def _curses_multiselect(
+    options: List[str],
+    sizes: List[str],
+    title: str,
+    current_dir: str,
+    selected_set: Set[int] | None = None,
+) -> Tuple[str, Set[int]]:
+    def _inner(stdscr: "curses._CursesWindow") -> Tuple[str, Set[int]]:
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
+        stdscr.nodelay(False)
+        stdscr.keypad(True)
+
+        index = 0
+        offset = 0
+        selected = set(selected_set or [])
+
+        while True:
+            stdscr.erase()
+            height, width = stdscr.getmaxyx()
+            if height < 6 or width < 15:
+                time.sleep(0.1)
+                continue
+
+            visible = max(1, height - 7)
+
+            try:
+                stdscr.addstr(0, 0, title[: width - 1], curses.A_BOLD)
+                dir_line = f"Directory: {current_dir}"
+                stdscr.addstr(1, 0, dir_line[: width - 1])
+                hint = "Controls: [UP/DOWN] Move | [SPACE] Toggle | [a] Select All | [c] Change Dir | [ENTER] Confirm | [q] Back"
+                stdscr.addstr(2, 0, hint[: width - 1])
+                summary = f"Selected: {len(selected)} / {len(options)} item(s)"
+                stdscr.addstr(3, 0, summary[: width - 1])
+            except curses.error:
+                pass
+
+            if not options:
+                try:
+                    stdscr.addstr(5, 0, "No bags found in directory."[: width - 1])
+                    stdscr.addstr(6, 0, "Press 'c' to change directory or 'q' to go back."[: width - 1])
+                except curses.error:
+                    pass
+            else:
+                if index < offset:
+                    offset = index
+                elif index >= offset + visible:
+                    offset = index - visible + 1
+
+                for row in range(visible):
+                    opt_index = offset + row
+                    if opt_index >= len(options):
+                        break
+                    label = options[opt_index]
+                    sz = sizes[opt_index] if opt_index < len(sizes) else ""
+                    is_chk = opt_index in selected
+                    check_mark = "[x] " if is_chk else "[ ] "
+                    line = f"{check_mark}{label:<42} ({sz})"
+                    y = row + 5
+                    if y < height - 1:
+                        try:
+                            if opt_index == index:
+                                stdscr.addstr(y, 0, line[: width - 1], curses.A_REVERSE)
+                            else:
+                                stdscr.addstr(y, 0, line[: width - 1])
+                        except curses.error:
+                            pass
+
+            stdscr.refresh()
+            key = stdscr.getch()
+
+            if key in (curses.KEY_UP, ord("k")):
+                if options:
+                    index = max(0, index - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                if options:
+                    index = min(len(options) - 1, index + 1)
+            elif key == ord(" "):
+                if options:
+                    if index in selected:
+                        selected.remove(index)
+                    else:
+                        selected.add(index)
+            elif key in (ord("a"), ord("A")):
+                if len(selected) == len(options):
+                    selected.clear()
+                else:
+                    selected = set(range(len(options)))
+            elif key in (ord("c"), ord("C")):
+                return "change", selected
+            elif key in (curses.KEY_ENTER, 10, 13):
+                if options:
+                    if not selected:
+                        selected.add(index)
+                    return "confirm", selected
+            elif key in (ord("q"), ord("Q"), 27):
+                return "cancel", set()
+
+    try:
+        return curses.wrapper(_inner)
+    except Exception as exc:
+        print(f"Interactive checklist unavailable ({exc}).")
+        return "cancel", set()
+
+
+def _select_bags_interactive(initial_dir: str) -> Tuple[List[Path], str]:
+    current_dir = str(Path(initial_dir).expanduser().resolve())
+    selected_indices: Set[int] = set()
+
+    while True:
+        options = _list_bag_dirs(current_dir)
+        sizes = [_get_item_size_str(Path(current_dir) / opt) for opt in options]
+        title = "Select Bag(s) to Send over TCP (Server)"
+        action, selected_indices = _curses_multiselect(
+            options, sizes, title, current_dir, selected_indices
+        )
+
+        if action == "cancel":
+            return [], current_dir
+        if action == "change":
+            new_path = input("\nEnter bag directory path: ").strip()
+            if new_path:
+                expanded = str(Path(new_path).expanduser().resolve())
+                if Path(expanded).exists() and Path(expanded).is_dir():
+                    current_dir = expanded
+                    selected_indices.clear()
+                else:
+                    print(f"{RED}Directory not found: {expanded}{RESET}")
+                    time.sleep(1)
+            continue
+        if action == "confirm":
+            selected_paths = [Path(current_dir) / options[i] for i in sorted(selected_indices) if i < len(options)]
+            return selected_paths, current_dir
 
 
 def _tcp_send(args: argparse.Namespace) -> int:
@@ -408,14 +573,30 @@ def _tcp_send(args: argparse.Namespace) -> int:
     config = _load_config(args.config)
     tcp_cfg = config["agi_logger"]["tcp_file_communication"]
     server_cfg = tcp_cfg.get("server", {})
+    logger_cfg = config.get("agi_logger", {}).get("logger", {})
+
+    file_paths: List[str] = []
+    if getattr(args, "files", None):
+        file_paths = [str(f) for f in args.files]
+    elif getattr(args, "file", None):
+        if isinstance(args.file, list):
+            file_paths = [str(f) for f in args.file]
+        else:
+            file_paths = [str(args.file)]
+
+    if not file_paths:
+        default_dir = str(logger_cfg.get("bag_path") or server_cfg.get("file_path") or "/workspaces/logging/test_bags")
+        selected_paths, chosen_dir = _select_bags_interactive(default_dir)
+        if not selected_paths:
+            print("No bags selected for transfer.")
+            return 0
+        file_paths = [str(p) for p in selected_paths]
 
     server = TcpServerConfig(
         host=args.host or server_cfg.get("host", "0.0.0.0"),
         port=args.port or int(server_cfg.get("port", 6000)),
-        file_path=args.file or server_cfg.get("file_path", ""),
+        file_paths=file_paths,
     )
-    if not server.file_path:
-        raise RuntimeError("File path is required for TCP send (configure in settings or pass --file)")
     send_file(server)
     return 0
 
@@ -450,7 +631,6 @@ def _tcp_run(args: argparse.Namespace) -> int:
         mode = choice or "ask"
 
     if mode == "server":
-        args.file = args.file or tcp_cfg.get("server", {}).get("file_path")
         args.host = args.host or tcp_cfg.get("server", {}).get("host")
         args.port = args.port or tcp_cfg.get("server", {}).get("port")
         return _tcp_send(args)
@@ -464,10 +644,188 @@ def _tcp_run(args: argparse.Namespace) -> int:
     raise RuntimeError(f"Unsupported tcp mode: {mode}")
 
 
+def _tcp_server_flow(config_path: Path) -> None:
+    config = _load_config(config_path)
+    logger_cfg = config.get("agi_logger", {}).get("logger", {})
+    tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
+    server_cfg = tcp_cfg.get("server", {})
+
+    host = str(server_cfg.get("host", "0.0.0.0"))
+    port = int(server_cfg.get("port", 6000))
+    default_dir = str(logger_cfg.get("bag_path") or server_cfg.get("file_path") or "/workspaces/logging/test_bags")
+
+    selected_paths, chosen_dir = _select_bags_interactive(default_dir)
+    if not selected_paths:
+        return
+
+    is_dirty = False
+
+    while True:
+        _clear_screen()
+        print(f"\n{BOLD}{CYAN}TCP Server Transfer Preview{RESET}")
+        print(f"{CYAN}1) Bind Host  :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{host}{RESET}")
+        print(f"{CYAN}2) Port       :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{port}{RESET}")
+        print(f"{CYAN}3) Directory  :{RESET} {LIGHT_GRAY}{chosen_dir}{RESET}")
+        print(f"{CYAN}Selected ({len(selected_paths)} item(s)):{RESET}")
+        for idx, sp in enumerate(selected_paths, start=1):
+            sz = _get_item_size_str(sp)
+            print(f"  {idx}. {GREEN}{sp.name}{RESET} ({sz})")
+
+        print(f"\n{BOLD}Options:{RESET} [Enter = Start / 1 = Change Host / 2 = Change Port / r = Reselect Bags / s = Save Config / n = Back]")
+        action = input(f"{BOLD}Select action:{RESET} ").strip().lower()
+
+        if action in {"1", "h", "host"}:
+            new_host = input(f"Enter bind host IP [{host}]: ").strip()
+            if new_host:
+                host = new_host
+                is_dirty = True
+            continue
+
+        if action in {"2", "p", "port"}:
+            new_port_str = input(f"Enter server port [{port}]: ").strip()
+            if new_port_str:
+                try:
+                    port = int(new_port_str)
+                    is_dirty = True
+                except ValueError:
+                    print(f"{RED}Invalid port number{RESET}")
+                    time.sleep(0.8)
+            continue
+
+        if action in {"r", "e", "reselect"}:
+            new_selected, chosen_dir = _select_bags_interactive(chosen_dir)
+            if new_selected:
+                selected_paths = new_selected
+            continue
+
+        if action in {"s", "save"}:
+            update_nested_value(config, "agi_logger.tcp_file_communication.server.host", host)
+            update_nested_value(config, "agi_logger.tcp_file_communication.server.port", port)
+            save_raw_config(config, config_path)
+            is_dirty = False
+            print(f"{GREEN}Settings saved to config.{RESET}")
+            time.sleep(0.8)
+            continue
+
+        if action in {"n", "q", "back"}:
+            break
+
+        if action in {"", "y", "start"}:
+            if is_dirty:
+                update_nested_value(config, "agi_logger.tcp_file_communication.server.host", host)
+                update_nested_value(config, "agi_logger.tcp_file_communication.server.port", port)
+                save_raw_config(config, config_path)
+
+            server = TcpServerConfig(
+                host=host,
+                port=port,
+                file_paths=[str(p) for p in selected_paths],
+            )
+            try:
+                send_file(server)
+            except Exception as exc:
+                print(f"\n{RED}Transfer error: {exc}{RESET}")
+            input(f"\n{LIGHT_GRAY}Press Enter to continue...{RESET}")
+            break
+
+
+def _tcp_client_flow(config_path: Path) -> None:
+    config = _load_config(config_path)
+    tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
+    client_cfg = tcp_cfg.get("client", {})
+
+    host = str(client_cfg.get("host", "localhost"))
+    port = int(client_cfg.get("port", 6000))
+    dest = str(client_cfg.get("destination_path", "."))
+
+    is_dirty = False
+
+    while True:
+        _clear_screen()
+        print(f"\n{BOLD}{CYAN}TCP Client (Receive) Settings Preview{RESET}")
+        print(f"{CYAN}1) Server Host IP  :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{host}{RESET}")
+        print(f"{CYAN}2) Server Port     :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{port}{RESET}")
+        print(f"{CYAN}3) Destination Path:{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{dest}{RESET}")
+
+        print(f"\n{BOLD}Options:{RESET} [Enter = Start / 1 = Change Host / 2 = Change Port / 3 = Change Dest / e = Settings Menu / s = Save Config / n = Back]")
+        action = input(f"{BOLD}Select action:{RESET} ").strip().lower()
+
+        if action in {"1", "h", "host"}:
+            new_host = input(f"Enter server host IP [{host}]: ").strip()
+            if new_host:
+                host = new_host
+                is_dirty = True
+            continue
+
+        if action in {"2", "p", "port"}:
+            new_port_str = input(f"Enter server port [{port}]: ").strip()
+            if new_port_str:
+                try:
+                    port = int(new_port_str)
+                    is_dirty = True
+                except ValueError:
+                    print(f"{RED}Invalid port number{RESET}")
+                    time.sleep(0.8)
+            continue
+
+        if action in {"3", "d", "dest"}:
+            new_dest = input(f"Enter destination path [{dest}]: ").strip()
+            if new_dest:
+                dest = str(Path(new_dest).expanduser().resolve())
+                is_dirty = True
+            continue
+
+        if action == "e":
+            _settings_menu(config_path, start_section="tcp_client")
+            config = _load_config(config_path)
+            tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
+            client_cfg = tcp_cfg.get("client", {})
+            host = str(client_cfg.get("host", "localhost"))
+            port = int(client_cfg.get("port", 6000))
+            dest = str(client_cfg.get("destination_path", "."))
+            is_dirty = False
+            continue
+
+        if action in {"s", "save"}:
+            update_nested_value(config, "agi_logger.tcp_file_communication.client.host", host)
+            update_nested_value(config, "agi_logger.tcp_file_communication.client.port", port)
+            update_nested_value(config, "agi_logger.tcp_file_communication.client.destination_path", dest)
+            save_raw_config(config, config_path)
+            is_dirty = False
+            print(f"{GREEN}Settings saved to config.{RESET}")
+            time.sleep(0.8)
+            continue
+
+        if action in {"n", "q", "back"}:
+            break
+
+        if action in {"", "y", "start"}:
+            if is_dirty:
+                update_nested_value(config, "agi_logger.tcp_file_communication.client.host", host)
+                update_nested_value(config, "agi_logger.tcp_file_communication.client.port", port)
+                update_nested_value(config, "agi_logger.tcp_file_communication.client.destination_path", dest)
+                save_raw_config(config, config_path)
+
+            client = TcpClientConfig(
+                host=host,
+                port=port,
+                destination_path=dest,
+            )
+            try:
+                receive_file(client)
+            except Exception as exc:
+                print(f"\n{RED}Transfer error: {exc}{RESET}")
+            input(f"\n{LIGHT_GRAY}Press Enter to continue...{RESET}")
+            break
+
+
 def _ros2_autostart(args: argparse.Namespace) -> int:
     from .ros2_node import run_autostart_node
 
-    run_autostart_node(args.config)
+    result = run_autostart_node(args.config)
+    if result == "menu":
+        parser = build_parser()
+        return _interactive_menu(parser, args.config)
     return 0
 
 
@@ -478,13 +836,6 @@ def _run_command(cmd: List[str]) -> int:
     except FileNotFoundError:
         print("Command not found. Ensure ROS 2 is installed and available in PATH.")
         return 1
-
-
-def _list_bag_dirs(path: str) -> List[str]:
-    base = Path(path).expanduser()
-    if not base.exists() or not base.is_dir():
-        return []
-    return sorted([p.name for p in base.iterdir() if p.is_dir()])
 
 
 def _curses_select(
@@ -616,10 +967,11 @@ def _run_rosbag_play_with_quit(cmd: List[str]) -> int:
         os.close(master_fd)
 
 
-def _play_menu(config_path: Path, initial_path: str | None = None) -> int:
+def _play_menu(config_path: Path, initial_path: str | None = None, read_ahead_queue_size: int | None = None) -> int:
     config = _load_config(config_path)
     logger_cfg = config.get("agi_logger", {}).get("logger", {})
     bag_path = initial_path or str(logger_cfg.get("bag_path", "."))
+    queue_size = read_ahead_queue_size or int(logger_cfg.get("read_ahead_queue_size", 10000))
     last_played: str | None = None
 
     while True:
@@ -644,14 +996,14 @@ def _play_menu(config_path: Path, initial_path: str | None = None) -> int:
         if action == "play" and index is not None:
             selected = options[index]
             full_path = str(Path(bag_path).expanduser() / selected)
-            cmd = ["ros2", "bag", "play", full_path]
+            cmd = ["ros2", "bag", "play", full_path, "--read-ahead-queue-size", str(queue_size)]
             _run_rosbag_play_with_quit(cmd)
             last_played = selected
             continue
 
 
 def _play_command(args: argparse.Namespace) -> int:
-    return _play_menu(args.config, args.path)
+    return _play_menu(args.config, args.path, getattr(args, "read_ahead_queue_size", None))
 
 
 def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int:
@@ -673,8 +1025,8 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
             while True:
                 _clear_screen()
                 print(f"\n{BOLD}{CYAN}TCP Transfer Menu{RESET}")
-                print(f"{GREEN}1){RESET} Server (Send)")
-                print(f"{GREEN}2){RESET} Client (Receive)")
+                print(f"{GREEN}1){RESET} Server (Select & Send Bags)")
+                print(f"{GREEN}2){RESET} Client (Receive Bags)")
                 print(f"{GREEN}3){RESET} Back")
                 sub = input(f"\n{BOLD}Select option:{RESET} ").strip()
                 if sub == "3" or sub == "":
@@ -684,35 +1036,13 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
                     time.sleep(0.8)
                     continue
 
-                config = _load_config(config_path)
-                tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
-                mode = "server" if sub == "1" else "client"
-                mode_cfg = tcp_cfg.get(mode, {})
-
-                _clear_screen()
-                print(f"\n{BOLD}{CYAN}TCP {mode.title()} Settings Preview{RESET}")
-                for key, value in mode_cfg.items():
-                    val_str = _format_display_value(value)
-                    print(f"{CYAN}- {key:<20}{RESET}: {LIGHT_GRAY}{val_str}{RESET}")
-
-                action = input(
-                    f"\n{BOLD}Continue transfer?{RESET} [Enter = Start / e = Edit / n = Back]: "
-                ).strip().lower()
-                if action == "e":
-                    _settings_menu(
-                        config_path,
-                        start_section="tcp_server" if mode == "server" else "tcp_client",
-                    )
+                if sub == "1":
+                    _tcp_server_flow(config_path)
                     continue
-                if action in {"", "y", "start"}:
-                    cmd = "send" if mode == "server" else "receive"
-                    args = parser.parse_args(["--config", str(config_path), "tcp", cmd])
-                    try:
-                        args.func(args)
-                    except Exception as exc:
-                        print(f"\n{RED}Transfer error: {exc}{RESET}")
-                    input(f"\n{LIGHT_GRAY}Press Enter to continue...{RESET}")
-                continue
+
+                if sub == "2":
+                    _tcp_client_flow(config_path)
+                    continue
 
         if choice == "3":
             args = parser.parse_args(["--config", str(config_path), "play"])
@@ -766,29 +1096,41 @@ def build_parser() -> argparse.ArgumentParser:
     bag_play.add_argument("bag", help="Bag path")
     bag_play.add_argument("--rate", type=float, default=1.0, help="Playback rate")
     bag_play.add_argument("--loop", action="store_true", help="Loop playback")
+    bag_play.add_argument(
+        "--read-ahead-queue-size",
+        type=int,
+        default=10000,
+        help="Queue size for pre-fetching messages to prevent starvation on compressed bags (default: 10000)",
+    )
     bag_play.set_defaults(func=_bag_play)
 
     play_parser = subparsers.add_parser("play", help="Select and play a bag")
     play_parser.add_argument("--path", help="Override bag directory path")
+    play_parser.add_argument(
+        "--read-ahead-queue-size",
+        type=int,
+        default=10000,
+        help="Queue size for pre-fetching messages (default: 10000)",
+    )
     play_parser.set_defaults(func=_play_command)
 
     tcp_parser = subparsers.add_parser("tcp", help="TCP file transfer")
     tcp_sub = tcp_parser.add_subparsers(dest="tcp_cmd", required=True)
 
-    tcp_send = tcp_sub.add_parser("send", help="Send a file or bag directory over TCP")
-    tcp_send.add_argument("--file", help="Path to file or bag directory to send")
+    tcp_send = tcp_sub.add_parser("send", help="Send file(s) or bag directory(ies) over TCP")
+    tcp_send.add_argument("--file", nargs="*", help="Path(s) to file or bag directory to send")
     tcp_send.add_argument("--host", help="Server bind host")
     tcp_send.add_argument("--port", type=int, help="Server port")
     tcp_send.set_defaults(func=_tcp_send)
 
-    tcp_receive = tcp_sub.add_parser("receive", help="Receive a file or bag directory over TCP")
+    tcp_receive = tcp_sub.add_parser("receive", help="Receive file(s) or bag directory(ies) over TCP")
     tcp_receive.add_argument("--host", help="Server host")
     tcp_receive.add_argument("--port", type=int, help="Server port")
     tcp_receive.add_argument("--dest", help="Destination directory")
     tcp_receive.set_defaults(func=_tcp_receive)
 
     tcp_run = tcp_sub.add_parser("run", help="Use configured TCP mode")
-    tcp_run.add_argument("--file", help="File or bag directory path (server mode)")
+    tcp_run.add_argument("--file", nargs="*", help="File or bag directory path(s) (server mode)")
     tcp_run.add_argument("--host", help="Host override")
     tcp_run.add_argument("--port", type=int, help="Port override")
     tcp_run.add_argument("--dest", help="Destination directory (client mode)")

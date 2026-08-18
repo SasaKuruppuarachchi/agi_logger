@@ -38,5 +38,5 @@ def test_build_parser():
     tcp_args = parser.parse_args(["tcp", "send", "--file", "/tmp/bag", "--port", "7000"])
     assert tcp_args.command == "tcp"
     assert tcp_args.tcp_cmd == "send"
-    assert tcp_args.file == "/tmp/bag"
+    assert tcp_args.file == ["/tmp/bag"]
     assert tcp_args.port == 7000

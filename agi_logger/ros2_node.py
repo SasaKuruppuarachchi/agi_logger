@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import os
+import select
+import shutil
+import sys
+import termios
+import time
+import tty
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 try:
     import rclpy
@@ -27,13 +34,62 @@ try:
 except ImportError:
     PlatformInfo = None
 
-if VehicleStatus is None and PlatformInfo is None:
-    raise RuntimeError(
-        "Neither px4_msgs nor as2_msgs are available in the current ROS 2 environment."
-    )
 
-from .config import load_raw_config
+from .config import load_raw_config, resolve_logger_paths
 from .logging_manager import RecorderManager
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+LIGHT_GRAY = "\033[90m"
+
+# Resource alert thresholds
+WARN_STORAGE_GB = 10.0
+CRITICAL_STORAGE_GB = 2.0
+WARN_RAM_GB = 1.0
+CRITICAL_RAM_GB = 0.3
+
+
+def get_system_resources(bag_path: str) -> Tuple[float, float, float, float, float, float]:
+    """Returns (free_ram_gb, total_ram_gb, ram_pct, free_storage_gb, total_storage_gb, storage_pct)."""
+    # RAM calculation
+    free_ram_gb = 0.0
+    total_ram_gb = 0.0
+    ram_pct = 0.0
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            mem_dict = {}
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    val_kb = int(parts[1].split()[0].strip())
+                    mem_dict[key] = val_kb
+            total_ram_gb = mem_dict.get("MemTotal", 0) / (1024 * 1024)
+            avail_ram_gb = mem_dict.get("MemAvailable", mem_dict.get("MemFree", 0)) / (1024 * 1024)
+            free_ram_gb = avail_ram_gb
+            ram_pct = (free_ram_gb / total_ram_gb) * 100 if total_ram_gb > 0 else 0.0
+    except Exception:
+        pass
+
+    # Storage calculation
+    try:
+        path_obj = Path(bag_path).expanduser().resolve()
+        check_dir = path_obj if path_obj.exists() else path_obj.parent
+        check_dir.mkdir(parents=True, exist_ok=True)
+        disk = shutil.disk_usage(check_dir)
+        free_storage_gb = disk.free / (1024**3)
+        total_storage_gb = disk.total / (1024**3)
+        storage_pct = (disk.free / disk.total) * 100 if disk.total > 0 else 0.0
+    except Exception:
+        free_storage_gb = 0.0
+        total_storage_gb = 0.0
+        storage_pct = 0.0
+
+    return free_ram_gb, total_ram_gb, ram_pct, free_storage_gb, total_storage_gb, storage_pct
 
 
 class AutoStartLoggerNode(Node):
@@ -41,12 +97,18 @@ class AutoStartLoggerNode(Node):
         super().__init__("agi_logger_autostart")
         self._config_path = config_path
         self._config = load_raw_config(config_path)
-        self._logger_cfg = self._config["agi_logger"]["logger"]
+        self._logger_cfg = resolve_logger_paths(self._config, config_path)
         self._auto_start = bool(self._logger_cfg.get("auto_start", False))
         self._behavior = str(self._logger_cfg.get("auto_start_behavior", "toggle_arm"))
         self._manager = RecorderManager(self._config, config_path)
         self._last_armed_state: Optional[bool] = None
         self._received_first_msg = False
+        self._bag_path = str(self._logger_cfg.get("bag_path", "/workspaces/logging/test_bags"))
+
+        if VehicleStatus is None and PlatformInfo is None:
+            raise RuntimeError(
+                "Neither px4_msgs nor as2_msgs are available. Please source your ROS 2 overlay workspace."
+            )
 
         topic = str(self._logger_cfg.get("auto_start_topic", "/drone0/platform/info"))
 
@@ -84,6 +146,9 @@ class AutoStartLoggerNode(Node):
             qos_profile,
         )
 
+        # Create periodic 0.1 Hz (every 10.0 seconds) resource monitor timer
+        self._monitor_timer = self.create_timer(10.0, self._check_system_resources)
+
         self.get_logger().info(
             f"AGI logger autostart node initialized on topic '{topic}' [{msg_type.__name__}] "
             f"(auto_start={self._auto_start}, behavior={self._behavior})"
@@ -92,6 +157,49 @@ class AutoStartLoggerNode(Node):
             self.get_logger().warn(
                 "auto_start is set to false in configs.yaml. Recording will NOT trigger on arming."
             )
+
+    def is_recording_active(self) -> bool:
+        return self._manager.is_recording()
+
+    def _check_system_resources(self) -> None:
+        if not self._manager.is_recording():
+            return
+
+        free_ram, total_ram, ram_pct, free_store, total_store, store_pct = get_system_resources(self._bag_path)
+
+        # Check critical condition
+        if free_store < CRITICAL_STORAGE_GB or free_ram < CRITICAL_RAM_GB:
+            print(
+                f"\n{BOLD}{RED}[CRITICAL RESOURCE ALERT] Low Storage ({free_store:.2f} GB < {CRITICAL_STORAGE_GB} GB) "
+                f"or RAM ({free_ram:.2f} GB < {CRITICAL_RAM_GB} GB)! Stopping recording safely to protect data...{RESET}"
+            )
+            self.get_logger().error("Critical storage/memory threshold reached. Performing emergency safe stop.")
+            try:
+                self._manager.stop_recording()
+                self._print_disarmed_instructions()
+            except Exception as exc:
+                self.get_logger().error(f"Error during emergency stop: {exc}")
+            return
+
+        # Check warning condition
+        if free_store < WARN_STORAGE_GB or free_ram < WARN_RAM_GB:
+            print(
+                f"{BOLD}{RED}[LOW RESOURCE WARNING] RAM Free: {free_ram:.2f}/{total_ram:.2f} GB ({ram_pct:.1f}%) | "
+                f"Storage Free: {free_store:.2f}/{total_store:.2f} GB ({store_pct:.1f}%){RESET}"
+            )
+            return
+
+        # Normal periodic status output (0.1 Hz)
+        print(
+            f"{CYAN}[SYSTEM MONITOR]{RESET} RAM Free: {GREEN}{free_ram:.2f}{RESET}/{total_ram:.2f} GB ({ram_pct:.1f}%) | "
+            f"Storage Free: {GREEN}{free_store:.2f}{RESET}/{total_store:.2f} GB ({store_pct:.1f}%)"
+        )
+
+    def _print_disarmed_instructions(self) -> None:
+        print(
+            f"\n{BOLD}{YELLOW}[Awaiting Arm]{RESET} "
+            f"Press {BOLD}{GREEN}'m'{RESET} for main menu | {BOLD}{RED}'q'{RESET} to quit | or wait for next arm..."
+        )
 
     def _on_status_msg(self, msg: Any) -> None:
         if hasattr(msg, "armed"):
@@ -110,6 +218,8 @@ class AutoStartLoggerNode(Node):
         if not self._received_first_msg:
             self._received_first_msg = True
             self.get_logger().info(f"Connected to telemetry stream. Initial state: {state_info}")
+            if not armed:
+                self._print_disarmed_instructions()
 
         if not self._auto_start:
             return
@@ -120,7 +230,6 @@ class AutoStartLoggerNode(Node):
         if self._behavior == "toggle_arm":
             if self._last_armed_state is None:
                 self._last_armed_state = armed
-                # If already armed at startup, start recording
                 if armed and not self._manager.is_recording():
                     self.get_logger().info("Vehicle is currently armed: starting bag recording (background)")
                     try:
@@ -144,6 +253,7 @@ class AutoStartLoggerNode(Node):
                     try:
                         self._manager.stop_recording()
                         self.get_logger().info("Recording stopped successfully.")
+                        self._print_disarmed_instructions()
                     except Exception as exc:
                         self.get_logger().error(f"Failed to stop recording: {exc}")
         else:
@@ -161,6 +271,7 @@ class AutoStartLoggerNode(Node):
                     try:
                         self._manager.stop_recording()
                         self.get_logger().info("Recording stopped successfully.")
+                        self._print_disarmed_instructions()
                     except Exception as exc:
                         self.get_logger().error(f"Failed to stop recording: {exc}")
 
@@ -175,14 +286,47 @@ class AutoStartLoggerNode(Node):
                 pass
 
 
-def run_autostart_node(config_path: Path) -> None:
+def run_autostart_node(config_path: Path) -> str:
     rclpy.init()
     node = AutoStartLoggerNode(config_path)
+    action = "exit"
+
+    is_tty = sys.stdin.isatty()
+    old_settings = None
+    if is_tty:
+        try:
+            old_settings = termios.tcgetattr(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno())
+        except Exception:
+            old_settings = None
+
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
+
+            # Check keyboard input during disarmed state
+            if is_tty and not node.is_recording_active():
+                readable, _, _ = select.select([sys.stdin], [], [], 0.0)
+                if readable:
+                    char = sys.stdin.read(1)
+                    if char in ("m", "M"):
+                        node.get_logger().info("Option 'm' pressed: returning to main menu...")
+                        action = "menu"
+                        break
+                    elif char in ("q", "Q"):
+                        node.get_logger().info("Option 'q' pressed: exiting autostart node...")
+                        action = "exit"
+                        break
     except KeyboardInterrupt:
-        pass
+        action = "exit"
     finally:
+        if old_settings is not None:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
+            except Exception:
+                pass
         node.shutdown()
         node.destroy_node()
         rclpy.shutdown()
+
+    return action
