@@ -197,6 +197,10 @@ class RecorderManager:
             max_bytes = int(max_bag_size * 1024 * 1024 * 1024)
             cmd += ["--max-bag-size", str(max_bytes)]
 
+        max_cache_size = int(self._logger_cfg.get("max_cache_size", 104857600))
+        if max_cache_size > 0:
+            cmd += ["--max-cache-size", str(max_cache_size)]
+
         cmd += list(topics)
         return cmd
 

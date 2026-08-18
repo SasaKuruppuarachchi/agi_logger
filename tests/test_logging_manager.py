@@ -30,6 +30,7 @@ def test_build_command_basic(tmp_path):
     assert cmd[cmd.index("--storage") + 1] == "mcap"
     assert "--compression-mode" in cmd
     assert "--max-bag-size" in cmd
+    assert "--max-cache-size" in cmd
     assert "/tf" in cmd
     assert "/clock" in cmd
 

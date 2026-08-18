@@ -29,6 +29,7 @@ agi_logger:
     duration: 10
     mcap: true
     read_ahead_queue_size: 10000
+    max_cache_size: 104857600
     auto_start: true
     auto_start_behavior: toggle_arm
     auto_start_topic: /drone0/platform/info
