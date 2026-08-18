@@ -1,4 +1,55 @@
 topics:
+  lidar_scan:
+    name: /drone0/livox/lidar
+    type: sensor_msgs/msg/PointCloud2
+  lidar_imu:
+    name: /drone0/livox/imu
+    type: sensor_msgs/msg/Imu
+  realsense_color:
+    name: /drone0/RealSense_Camera/color/image_raw
+    type: sensor_msgs/msg/Image
+  realsense_depth:
+    name: /drone0/RealSense_Camera/depth
+    type: sensor_msgs/msg/PointCloud2
+  realsence_camera_info:
+    name: /drone0/RealSense_Camera/color/camera_info
+    type: sensor_msgs/msg/CameraInfo
+  realsence_depth_info:
+    name: /drone0/RealSense_Camera/depth/camera_info
+    type: sensor_msgs/msg/CameraInfo
+  rgb1_image_raw:
+    name: /rgb1/image_raw
+    type: sensor_msgs/msg/Image
+  rgb1_camera_info:
+    name: /rgb1/camera_info
+    type: sensor_msgs/msg/CameraInfo
+  px4_sensor_combined:
+    name: /fmu/out/sensor_combined
+    type: px4_msgs/msg/SensorCombined
+  px4_imu_processed:
+    name: /drone0/px4_imu
+    type: sensor_msgs/msg/Imu
+  LIO_odometry:
+    name: /drone0/adaptive_lio/state/odom
+    type: nav_msgs/msg/Odometry
+  LIO_path:
+    name: /drone0/adaptive_lio/odometry_path
+    type: nav_msgs/msg/Path
+  LIO_sparce_cloud:
+    name: /drone0/adaptive_lio/scan_sparce
+    type: sensor_msgs/msg/PointCloud2
+  LIO_map_cloud:
+    name: /drone0/adaptive_lio/map_cloud
+    type: sensor_msgs/msg/PointCloud2
+  LIO_dence_cloud:
+    name: /drone0/adaptive_lio/scan
+    type: sensor_msgs/msg/PointCloud2
+  gps_global:
+    name: /fmu/out/vehicle_gps_position
+    type: px4_msgs/msg/VehicleGpsPosition
+  odom_pushed_to_px4:
+    name: /fmu/in/vehicle_visual_odometry
+    type: px4_msgs/msg/VehicleVisualOdometry
   control_mode:
     name: /fmu/out/vehicle_control_mode
     type: px4_msgs/msg/VehicleControlMode
@@ -20,6 +71,12 @@ topics:
   offboard_velocity_cmd:
     name: /offboard_velocity_cmd
     type: geometry_msgs/msg/Twist
-  realsense_color_image_raw:
-    name: /drone1/RealSense_Camera/color/image_raw
-    type: sensor_msgs/msg/Image
+  px4_actuator_motors:
+    name: /fmu/out/actuator_motors
+    type: px4_msgs/msg/ActuatorMotors
+  tf:
+    name: /tf
+    type: tf2_msgs/msg/TFMessage
+  tf_static:
+    name: /tf_static
+    type: tf2_msgs/msg/TFMessage

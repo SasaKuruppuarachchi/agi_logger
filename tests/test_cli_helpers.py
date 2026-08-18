@@ -40,3 +40,20 @@ def test_build_parser():
     assert tcp_args.tcp_cmd == "send"
     assert tcp_args.file == ["/tmp/bag"]
     assert tcp_args.port == 7000
+
+
+def test_load_topics_catalogue(tmp_path):
+    from agi_logger.cli import _load_topics_catalogue
+
+    cfg_file = tmp_path / "configs.yaml"
+    cfg_file.write_text("dummy")
+    topics_file = tmp_path / "topics_of_interest.yaml"
+    topics_file.write_text(
+        "topics:\n  mode:\n    name: /fmu/out/vehicle_control_mode\n    type: px4_msgs/msg/VehicleControlMode\n"
+    )
+
+    catalogue = _load_topics_catalogue(cfg_file, ["/clock", "/tf"])
+    names = [c[0] for c in catalogue]
+    assert "/fmu/out/vehicle_control_mode" in names
+    assert "/clock" in names
+    assert "/tf" in names

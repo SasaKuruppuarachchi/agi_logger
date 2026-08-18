@@ -147,6 +147,175 @@ def _get_item_size_str(item_path: Path) -> str:
         return "unknown size"
 
 
+def _load_topics_catalogue(config_path: Path, current_topics: List[str]) -> List[Tuple[str, str]]:
+    topics_file = config_path.parent / "topics_of_interest.yaml"
+    if not topics_file.exists():
+        fallback = Path(__file__).resolve().parents[1] / "cfg" / "topics_of_interest.yaml"
+        if fallback.exists():
+            topics_file = fallback
+
+    catalogue: List[Tuple[str, str]] = []
+    seen_names: Set[str] = set()
+
+    if topics_file.exists():
+        try:
+            with topics_file.open("r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            topics_dict = data.get("topics", {})
+            for key, val in topics_dict.items():
+                if isinstance(val, dict) and "name" in val:
+                    t_name = str(val["name"]).strip()
+                    t_type = str(val.get("type", ""))
+                    if t_name and t_name not in seen_names:
+                        catalogue.append((t_name, t_type))
+                        seen_names.add(t_name)
+        except Exception:
+            pass
+
+    # Also include existing active topics so custom topics in configs.yaml are preserved
+    for t_name in current_topics:
+        t_clean = str(t_name).strip()
+        if t_clean and t_clean not in seen_names:
+            catalogue.append((t_clean, "active"))
+            seen_names.add(t_clean)
+
+    return catalogue
+
+
+def _curses_topic_multiselect(
+    catalogue: List[Tuple[str, str]],
+    selected_set: Set[str],
+) -> Tuple[str, Set[str]]:
+    def _inner(stdscr: "curses._CursesWindow") -> Tuple[str, Set[str]]:
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
+        stdscr.nodelay(False)
+        stdscr.keypad(True)
+
+        items = list(catalogue)
+        selected = set(selected_set)
+        index = 0
+        offset = 0
+
+        while True:
+            stdscr.erase()
+            height, width = stdscr.getmaxyx()
+            if height < 6 or width < 15:
+                time.sleep(0.1)
+                continue
+
+            visible = max(1, height - 6)
+
+            try:
+                title = "Select Topics to Record (topics_of_interest.yaml)"
+                stdscr.addstr(0, 0, title[: width - 1], curses.A_BOLD)
+                hint = "Controls: [UP/DOWN] Move | [SPACE] Toggle | [a] Select All | [+] Add Custom | [ENTER] Save | [q] Cancel"
+                stdscr.addstr(1, 0, hint[: width - 1])
+                summary = f"Selected: {len(selected)} / {len(items)} topic(s)"
+                stdscr.addstr(2, 0, summary[: width - 1], curses.A_BOLD)
+            except curses.error:
+                pass
+
+            if not items:
+                try:
+                    stdscr.addstr(4, 0, "No topics found in catalogue."[: width - 1])
+                except curses.error:
+                    pass
+            else:
+                if index < offset:
+                    offset = index
+                elif index >= offset + visible:
+                    offset = index - visible + 1
+
+                for row in range(visible):
+                    opt_index = offset + row
+                    if opt_index >= len(items):
+                        break
+                    t_name, t_type = items[opt_index]
+                    is_chk = t_name in selected
+                    check_mark = "[x] " if is_chk else "[ ] "
+                    type_info = f" ({t_type})" if t_type else ""
+                    line = f"{check_mark}{t_name:<44}{type_info}"
+                    y = row + 4
+                    if y < height - 1:
+                        try:
+                            if opt_index == index:
+                                stdscr.addstr(y, 0, line[: width - 1], curses.A_REVERSE)
+                            else:
+                                stdscr.addstr(y, 0, line[: width - 1])
+                        except curses.error:
+                            pass
+
+            stdscr.refresh()
+            key = stdscr.getch()
+
+            if key in (curses.KEY_UP, ord("k")):
+                if items:
+                    index = max(0, index - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                if items:
+                    index = min(len(items) - 1, index + 1)
+            elif key == ord(" "):
+                if items:
+                    cur_name = items[index][0]
+                    if cur_name in selected:
+                        selected.remove(cur_name)
+                    else:
+                        selected.add(cur_name)
+            elif key in (ord("a"), ord("A")):
+                all_names = {t[0] for t in items}
+                if selected == all_names:
+                    selected.clear()
+                else:
+                    selected = set(all_names)
+            elif key in (ord("+"), ord("=")):
+                return "add_custom", selected
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return "confirm", selected
+            elif key in (ord("q"), ord("Q"), 27):
+                return "cancel", selected_set
+
+    try:
+        return curses.wrapper(_inner)
+    except Exception as exc:
+        print(f"Interactive topic selector unavailable ({exc}).")
+        return "cancel", selected_set
+
+
+def _topics_selection_flow(config_path: Path, config: Dict[str, Any]) -> bool:
+    logger_cfg = config.get("agi_logger", {}).get("logger", {})
+    current_topics = list(logger_cfg.get("topics", []))
+    selected_set = set(current_topics)
+
+    catalogue = _load_topics_catalogue(config_path, current_topics)
+
+    while True:
+        action, selected_set = _curses_topic_multiselect(catalogue, selected_set)
+
+        if action == "cancel":
+            return False
+
+        if action == "add_custom":
+            new_t = input("\nEnter ROS 2 topic name (e.g. /my_sensor/data): ").strip()
+            if new_t:
+                if not new_t.startswith("/"):
+                    new_t = "/" + new_t
+                if not any(t[0] == new_t for t in catalogue):
+                    catalogue.append((new_t, "custom"))
+                selected_set.add(new_t)
+            continue
+
+        if action == "confirm":
+            new_topics_list = [t[0] for t in catalogue if t[0] in selected_set]
+            update_nested_value(config, "agi_logger.logger.topics", new_topics_list)
+            save_raw_config(config, config_path)
+            print(f"{GREEN}Updated topics list ({len(new_topics_list)} topics) saved to {config_path.name}.{RESET}")
+            time.sleep(0.8)
+            return True
+
+
 def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
     config = _load_config(config_path)
     dirty_keys: Set[str] = set()
@@ -242,6 +411,22 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
                     continue
 
                 display_name, full_key, current_value = display_entries[index - 1]
+
+                if display_name == "topics":
+                    print(f"\n{YELLOW}Topic Selection Mode:{RESET}")
+                    print(f"  {GREEN}1){RESET} Interactive Checklist (from topics_of_interest.yaml)")
+                    print(f"  {GREEN}2){RESET} Manual text input")
+                    mode_choice = input(f"{BOLD}Select mode [1/2, default 1]:{RESET} ").strip()
+                    if mode_choice in {"", "1"}:
+                        changed = _topics_selection_flow(config_path, config)
+                        if changed:
+                            dirty_keys.add(full_key)
+                            section = config
+                            for part in section_key.split("."):
+                                section = section.get(part, {}) if isinstance(section, dict) else {}
+                            entries = list(iter_nested_keys(section, section_key))
+                        continue
+
                 print(f"\n{YELLOW}Editing{RESET} {BOLD}{display_name}{RESET}")
                 if isinstance(current_value, list):
                     print(f"{LIGHT_GRAY}Current list ({len(current_value)} items):{RESET}")
@@ -300,68 +485,81 @@ def _record_start(args: argparse.Namespace) -> int:
 
 
 def _record_preview(args: argparse.Namespace) -> int:
-    _clear_screen()
-    config = _load_config(args.config)
-    logger_cfg = config.get("agi_logger", {}).get("logger", {})
-    print(f"\n{BOLD}{CYAN}Record Settings Preview{RESET}")
-    for key, value in logger_cfg.items():
-        val_str = _format_display_value(value)
-        print(f"{CYAN}- {key:<20}{RESET}: {LIGHT_GRAY}{val_str}{RESET}")
+    while True:
+        _clear_screen()
+        config = _load_config(args.config)
+        logger_cfg = config.get("agi_logger", {}).get("logger", {})
+        print(f"\n{BOLD}{CYAN}Record Settings Preview{RESET}")
+        for key, value in logger_cfg.items():
+            val_str = _format_display_value(value)
+            print(f"{CYAN}- {key:<20}{RESET}: {LIGHT_GRAY}{val_str}{RESET}")
 
-    action = input(
-        f"\n{BOLD}Action:{RESET} [Enter = Start / e = Edit / a = Autostart node / n = Cancel]: "
-    ).strip().lower()
-    if action == "e":
-        _settings_menu(args.config, start_section="logger")
+        action = input(
+            f"\n{BOLD}Action:{RESET} [Enter = Start / t = Select Topics / e = Edit / a = Autostart node / n = Cancel]: "
+        ).strip().lower()
+
+        if action in {"t", "topics", "topic"}:
+            _topics_selection_flow(args.config, config)
+            continue
+        if action == "e":
+            _settings_menu(args.config, start_section="logger")
+            continue
+        if action == "a":
+            args = build_parser().parse_args(["--config", str(args.config), "ros2", "autostart"])
+            return args.func(args)
+        if action in {"", "y", "start"}:
+            args = build_parser().parse_args(["--config", str(args.config), "record", "start"])
+            return args.func(args)
         return 0
-    if action == "a":
-        args = build_parser().parse_args(["--config", str(args.config), "ros2", "autostart"])
-        return args.func(args)
-    if action in {"", "y", "start"}:
-        args = build_parser().parse_args(["--config", str(args.config), "record", "start"])
-        return args.func(args)
-    return 0
 
 
 def _prompt_record_after_settings(
     config_path: Path, config: Dict[str, Any], highlight_keys: Set[str] | None = None
 ) -> bool:
-    _clear_screen()
-    logger_cfg = config.get("agi_logger", {}).get("logger", {})
-    print(f"\n{BOLD}{CYAN}Record Settings Preview{RESET}")
-    for key, value in logger_cfg.items():
-        val_str = _format_display_value(value)
-        full_key = f"agi_logger.logger.{key}"
-        color = YELLOW if highlight_keys and full_key in highlight_keys else LIGHT_GRAY
-        print(f"{CYAN}- {key:<20}{RESET}: {color}{val_str}{RESET}")
+    while True:
+        _clear_screen()
+        logger_cfg = config.get("agi_logger", {}).get("logger", {})
+        print(f"\n{BOLD}{CYAN}Record Settings Preview{RESET}")
+        for key, value in logger_cfg.items():
+            val_str = _format_display_value(value)
+            full_key = f"agi_logger.logger.{key}"
+            color = YELLOW if highlight_keys and full_key in highlight_keys else LIGHT_GRAY
+            print(f"{CYAN}- {key:<20}{RESET}: {color}{val_str}{RESET}")
 
-    action = input(
-        f"\n{BOLD}Continue?{RESET} [Enter = Start Recording / e = Edit / a = Autostart node / s = Save & Return / n = Discard]: "
-    ).strip().lower()
-    if action == "e":
-        _settings_menu(config_path, start_section="logger")
-        return True
-    if action == "s":
-        save_raw_config(config, config_path)
-        if highlight_keys is not None:
-            highlight_keys.clear()
-        print(f"{GREEN}Settings saved.{RESET}")
-        time.sleep(1)
+        action = input(
+            f"\n{BOLD}Continue?{RESET} [Enter = Start Recording / t = Select Topics / e = Edit / a = Autostart node / s = Save & Return / n = Discard]: "
+        ).strip().lower()
+
+        if action in {"t", "topics", "topic"}:
+            _topics_selection_flow(config_path, config)
+            if highlight_keys is not None:
+                highlight_keys.add("agi_logger.logger.topics")
+            continue
+        if action == "e":
+            _settings_menu(config_path, start_section="logger")
+            return True
+        if action == "s":
+            save_raw_config(config, config_path)
+            if highlight_keys is not None:
+                highlight_keys.clear()
+            print(f"{GREEN}Settings saved.{RESET}")
+            time.sleep(1)
+            return False
+        if action == "a":
+            save_raw_config(config, config_path)
+            if highlight_keys is not None:
+                highlight_keys.clear()
+            args = build_parser().parse_args(["--config", str(config_path), "ros2", "autostart"])
+            args.func(args)
+            return False
+        if action in {"", "y", "start"}:
+            save_raw_config(config, config_path)
+            if highlight_keys is not None:
+                highlight_keys.clear()
+            args = build_parser().parse_args(["--config", str(config_path), "record", "start"])
+            args.func(args)
+            return False
         return False
-    if action == "a":
-        save_raw_config(config, config_path)
-        if highlight_keys is not None:
-            highlight_keys.clear()
-        args = build_parser().parse_args(["--config", str(config_path), "ros2", "autostart"])
-        args.func(args)
-        return False
-    if action in {"", "y", "start"}:
-        save_raw_config(config, config_path)
-        if highlight_keys is not None:
-            highlight_keys.clear()
-        args = build_parser().parse_args(["--config", str(config_path), "record", "start"])
-        args.func(args)
-    return False
 
 
 def _prompt_tcp_after_settings(
