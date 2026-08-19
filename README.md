@@ -233,8 +233,9 @@ tests/test_manual_recording.py::test_record_start_background PASSED
 tests/test_manual_recording.py::test_record_start_foreground_menu PASSED
 tests/test_ros2_node.py::test_get_system_resources PASSED
 tests/test_ros2_node.py::test_resource_threshold_constants PASSED
+tests/test_tcp_transfer.py::test_get_host_ips PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_single_file PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_directory_bag PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_multiple_bags_batch PASSED
-============= 24 passed in 1.00s ==============
+============= 25 passed in 1.05s ==============
 ```
