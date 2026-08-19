@@ -67,9 +67,11 @@
 
 | Task | One-Liner Command |
 | :--- | :--- |
-| **Interactive Bag Playback Selector** | `agi-logger play` |
+| **Interactive Bag Playback Selector** | `agi-logger play` *(press `t` to toggle `--clock`)* |
 | **Bag Playback from Specific Directory** | `agi-logger play --path /workspaces/logging/test_bags` |
 | **Direct Bag Playback (Rate & Loop Controls)** | `agi-logger bag play /path/to/bag --rate 1.5 --loop` |
+| **Bag Playback with Clock Topic (Default)** | `agi-logger bag play /path/to/bag --clock` |
+| **Bag Playback without Clock Topic** | `agi-logger bag play /path/to/bag --no-clock` |
 | **Bag Playback with Custom Pre-fetch Queue** | `agi-logger bag play /path/to/bag --read-ahead-queue-size 10000` |
 | **Direct Configuration Editor** | `agi-logger settings` |
 
@@ -149,6 +151,8 @@ graph TD
 
 ### 4. Interactive Bag Playback (`_play_menu`)
 - Scrollable curses selector listing all recorded bags with size indicators.
+- **Interactive Topic Filtering**: After choosing a bag, an interactive checkbox list displays all topics found in the bag (with types and message counts). All topics are **ticked ON by default** (`[x]`), allowing users to selectively tick off conflicting/unwanted topics (such as raw PX4 bridge topics) before playback.
+- **Clock Topic Toggle**: Live toggle for `--clock` (default `ON` / `True`) by pressing **`t`** directly in the selector before playing.
 - Non-blocking PTY execution: pressing **`q`** stops playback and returns to the list immediately, while preserving standard ROS 2 player keyboard controls (`Space` for pause, `Arrows` for step).
 - Pre-configured `--read-ahead-queue-size 10000` eliminates queue starvation warnings on compressed bags.
 
@@ -215,6 +219,8 @@ Output:
 tests/test_cli_helpers.py::test_parse_values PASSED
 tests/test_cli_helpers.py::test_format_display_value PASSED
 tests/test_cli_helpers.py::test_build_parser PASSED
+tests/test_cli_helpers.py::test_bag_play_command_build PASSED
+tests/test_cli_helpers.py::test_get_bag_topics PASSED
 tests/test_cli_helpers.py::test_load_topics_catalogue PASSED
 tests/test_config.py::test_load_and_save_raw_config PASSED
 tests/test_config.py::test_update_nested_value PASSED
@@ -237,5 +243,5 @@ tests/test_tcp_transfer.py::test_get_host_ips PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_single_file PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_directory_bag PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_multiple_bags_batch PASSED
-============= 25 passed in 1.05s ==============
+============= 27 passed in 1.06s ==============
 ```

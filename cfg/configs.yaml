@@ -7,7 +7,7 @@ agi_logger:
     - /drone0/livox/imu
     - /fmu/out/sensor_combined
     - /drone0/px4_imu
-    name: lio_test_w_sync
+    name: lio_test_sim_not_mcap
     max_bag_size: 1
     override_qos: false
     qos_settings: cfg/qos_profiles.yaml

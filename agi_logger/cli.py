@@ -15,6 +15,7 @@ import tty
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+import sqlite3
 import yaml
 
 from .config import (
@@ -728,8 +729,58 @@ def _record_status(args: argparse.Namespace) -> int:
     return _print_status(manager)
 
 
+def _get_bag_topics(bag_path: Path | str) -> List[Tuple[str, str, int]]:
+    p = Path(bag_path).expanduser().resolve()
+    bag_dir = p if p.is_dir() else p.parent
+    metadata_file = bag_dir / "metadata.yaml"
+    if metadata_file.exists():
+        try:
+            with open(metadata_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            info = data.get("rosbag2_bagfile_information", {})
+            topics_list = info.get("topics_with_message_count", [])
+            results = []
+            for item in topics_list:
+                meta = item.get("topic_metadata", {})
+                name = meta.get("name", "")
+                msg_type = meta.get("type", "")
+                count = item.get("message_count", 0)
+                if name:
+                    results.append((name, msg_type, count))
+            if results:
+                return results
+        except Exception:
+            pass
+
+    # Fallback to sqlite3 if metadata.yaml was missing or empty
+    db_files = list(bag_dir.glob("*.db3"))
+    if db_files:
+        try:
+            conn = sqlite3.connect(f"file:{db_files[0]}?mode=ro", uri=True)
+            cur = conn.cursor()
+            cur.execute("SELECT id, name, type FROM topics")
+            db_topics = cur.fetchall()
+            results = []
+            for tid, tname, ttype in db_topics:
+                cur.execute("SELECT count(*) FROM messages WHERE topic_id = ?", (tid,))
+                count_row = cur.fetchone()
+                cnt = count_row[0] if count_row else 0
+                results.append((tname, ttype, cnt))
+            conn.close()
+            if results:
+                return results
+        except Exception:
+            pass
+
+    return []
+
+
 def _bag_play(args: argparse.Namespace) -> int:
     cmd = ["ros2", "bag", "play", args.bag]
+    if getattr(args, "topics", None):
+        cmd += ["--topics"] + list(args.topics)
+    if getattr(args, "clock", True):
+        cmd += ["--clock"]
     if getattr(args, "rate", None):
         cmd += ["--rate", str(args.rate)]
     if getattr(args, "loop", False):
@@ -1181,8 +1232,9 @@ def _curses_select(
     hint: str,
     initial_index: int | None = None,
     last_played_index: int | None = None,
-) -> Tuple[str, int | None]:
-    def _inner(stdscr: "curses._CursesWindow") -> Tuple[str, int | None]:
+    clock_enabled: bool = True,
+) -> Tuple[str, int | None, bool]:
+    def _inner(stdscr: "curses._CursesWindow") -> Tuple[str, int | None, bool]:
         try:
             curses.curs_set(0)
         except Exception:
@@ -1192,6 +1244,7 @@ def _curses_select(
 
         index = initial_index or 0
         offset = 0
+        current_clock = clock_enabled
 
         while True:
             stdscr.erase()
@@ -1202,9 +1255,13 @@ def _curses_select(
 
             visible = max(1, height - 5)
 
+            clock_status = "[Clock (--clock): ON]" if current_clock else "[Clock (--clock): OFF]"
+            full_title = f"{title} | {clock_status}"
+            full_hint = "UP/DOWN: select | Enter: play | t: toggle clock | c: change dir | q: back"
+
             try:
-                stdscr.addstr(0, 0, title[: width - 1])
-                stdscr.addstr(1, 0, hint[: width - 1])
+                stdscr.addstr(0, 0, full_title[: width - 1])
+                stdscr.addstr(1, 0, full_hint[: width - 1])
             except curses.error:
                 pass
 
@@ -1248,17 +1305,19 @@ def _curses_select(
                     index = min(len(options) - 1, index + 1)
             elif key in (curses.KEY_ENTER, 10, 13):
                 if options:
-                    return "play", index
+                    return "play", index, current_clock
+            elif key in (ord("t"), ord("T")):
+                current_clock = not current_clock
             elif key in (ord("c"), ord("C")):
-                return "change", None
+                return "change", None, current_clock
             elif key in (ord("q"), ord("Q"), 27):
-                return "cancel", None
+                return "cancel", None, current_clock
 
     try:
         return curses.wrapper(_inner)
     except Exception as exc:
         print(f"Interactive selector unavailable ({exc}).")
-        return "cancel", None
+        return "cancel", None, clock_enabled
 
 
 def _run_rosbag_play_with_quit(cmd: List[str]) -> int:
@@ -1304,19 +1363,144 @@ def _run_rosbag_play_with_quit(cmd: List[str]) -> int:
         os.close(master_fd)
 
 
-def _play_menu(config_path: Path, initial_path: str | None = None, read_ahead_queue_size: int | None = None) -> int:
+def _curses_play_topics_checklist(
+    topics: List[Tuple[str, str, int]],
+    bag_name: str,
+    clock_enabled: bool = True,
+) -> Tuple[str, Set[str], bool]:
+    def _inner(stdscr: "curses._CursesWindow") -> Tuple[str, Set[str], bool]:
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
+        stdscr.nodelay(False)
+        stdscr.keypad(True)
+
+        items = list(topics)
+        all_topic_names = {t[0] for t in items}
+        selected = set(all_topic_names)
+        index = 0
+        offset = 0
+        current_clock = clock_enabled
+        warning_msg = ""
+
+        while True:
+            stdscr.erase()
+            height, width = stdscr.getmaxyx()
+            if height < 6 or width < 15:
+                time.sleep(0.1)
+                continue
+
+            visible = max(1, height - 6)
+
+            clock_status = "[Clock (--clock): ON]" if current_clock else "[Clock (--clock): OFF]"
+            title = f"Filter Topics to Play: {bag_name} | {clock_status}"
+            hint = "Controls: [UP/DOWN] Move | [SPACE] Toggle | [a] Toggle All | [t] Clock | [ENTER] Play | [q] Back"
+            summary = f"Selected: {len(selected)} / {len(items)} topic(s)"
+            if warning_msg:
+                summary += f"  -- {warning_msg}"
+
+            try:
+                stdscr.addstr(0, 0, title[: width - 1], curses.A_BOLD)
+                stdscr.addstr(1, 0, hint[: width - 1])
+                stdscr.addstr(2, 0, summary[: width - 1], curses.A_BOLD)
+            except curses.error:
+                pass
+
+            if not items:
+                try:
+                    stdscr.addstr(4, 0, "No topic metadata found in bag."[: width - 1])
+                except curses.error:
+                    pass
+            else:
+                if index < offset:
+                    offset = index
+                elif index >= offset + visible:
+                    offset = index - visible + 1
+
+                for row in range(visible):
+                    opt_index = offset + row
+                    if opt_index >= len(items):
+                        break
+                    t_name, t_type, t_count = items[opt_index]
+                    is_chk = t_name in selected
+                    check_mark = "[x] " if is_chk else "[ ] "
+                    info_str = f" ({t_type}, {t_count} msgs)" if t_type else f" ({t_count} msgs)"
+                    line = f"{check_mark}{t_name:<38}{info_str}"
+                    y = row + 4
+                    if y < height - 1:
+                        try:
+                            if opt_index == index:
+                                stdscr.addstr(y, 0, line[: width - 1], curses.A_REVERSE)
+                            else:
+                                stdscr.addstr(y, 0, line[: width - 1])
+                        except curses.error:
+                            pass
+
+            stdscr.refresh()
+            key = stdscr.getch()
+
+            if key in (curses.KEY_UP, ord("k")):
+                if items:
+                    index = max(0, index - 1)
+                warning_msg = ""
+            elif key in (curses.KEY_DOWN, ord("j")):
+                if items:
+                    index = min(len(items) - 1, index + 1)
+                warning_msg = ""
+            elif key == ord(" "):
+                if items:
+                    cur_name = items[index][0]
+                    if cur_name in selected:
+                        selected.remove(cur_name)
+                    else:
+                        selected.add(cur_name)
+                warning_msg = ""
+            elif key in (ord("a"), ord("A")):
+                if len(selected) == len(all_topic_names):
+                    selected.clear()
+                else:
+                    selected = set(all_topic_names)
+                warning_msg = ""
+            elif key in (ord("t"), ord("T")):
+                current_clock = not current_clock
+            elif key in (curses.KEY_ENTER, 10, 13):
+                if not selected:
+                    warning_msg = "Please select at least 1 topic (or press 'q' to cancel)"
+                    continue
+                return "confirm", selected, current_clock
+            elif key in (ord("q"), ord("Q"), 27):
+                return "cancel", selected, current_clock
+
+    try:
+        return curses.wrapper(_inner)
+    except Exception as exc:
+        print(f"Interactive topic filter unavailable ({exc}).")
+        return "confirm", {t[0] for t in topics}, clock_enabled
+
+
+def _play_menu(
+    config_path: Path,
+    initial_path: str | None = None,
+    read_ahead_queue_size: int | None = None,
+    clock: bool = True,
+    filter_topics: List[str] | None = None,
+) -> int:
     config = _load_config(config_path)
     logger_cfg = config.get("agi_logger", {}).get("logger", {})
     bag_path = initial_path or str(logger_cfg.get("bag_path", "."))
     queue_size = read_ahead_queue_size or int(logger_cfg.get("read_ahead_queue_size", 10000))
+    clock_enabled = clock
     last_played: str | None = None
 
     while True:
         options = _list_bag_dirs(bag_path)
         title = f"Select a bag to play (path: {bag_path})"
-        hint = "UP/DOWN to select | Enter: play | c: change dir | q: back (press 'q' during play to stop)"
+        hint = "UP/DOWN: select | Enter: select bag | t: toggle clock | c: change dir | q: back (press 'q' during play to stop)"
         last_index = options.index(last_played) if last_played in options else None
-        action, index = _curses_select(options, title, hint, last_index, last_index)
+        action, index, clock_enabled = _curses_select(
+            options, title, hint, last_index, last_index, clock_enabled=clock_enabled
+        )
 
         if action == "cancel":
             return 0
@@ -1332,15 +1516,54 @@ def _play_menu(config_path: Path, initial_path: str | None = None, read_ahead_qu
             continue
         if action == "play" and index is not None:
             selected = options[index]
-            full_path = str(Path(bag_path).expanduser() / selected)
-            cmd = ["ros2", "bag", "play", full_path, "--read-ahead-queue-size", str(queue_size)]
+            full_path = Path(bag_path).expanduser() / selected
+            
+            bag_topics = _get_bag_topics(full_path)
+            
+            if filter_topics is not None:
+                selected_topics = list(filter_topics)
+            elif bag_topics:
+                t_action, chosen_topics, clock_enabled = _curses_play_topics_checklist(
+                    bag_topics,
+                    bag_name=selected,
+                    clock_enabled=clock_enabled,
+                )
+                if t_action != "confirm" or not chosen_topics:
+                    continue
+                selected_topics = sorted(chosen_topics)
+            else:
+                selected_topics = []
+
+            cmd = ["ros2", "bag", "play", str(full_path), "--read-ahead-queue-size", str(queue_size)]
+            if bag_topics and len(selected_topics) < len(bag_topics) and len(selected_topics) > 0:
+                cmd.extend(["--topics", *selected_topics])
+            elif not bag_topics and selected_topics:
+                cmd.extend(["--topics", *selected_topics])
+                
+            if clock_enabled:
+                cmd.append("--clock")
+
+            topic_summary = f"{len(selected_topics)}/{len(bag_topics)} topics" if bag_topics else "all topics"
+            print(f"\n{CYAN}Playing {selected} ({topic_summary}, Clock: {'ON' if clock_enabled else 'OFF'})...{RESET}")
+            if bag_topics and len(selected_topics) < len(bag_topics):
+                print(f"{LIGHT_GRAY}Filtered topics: {', '.join(selected_topics)}{RESET}")
+
             _run_rosbag_play_with_quit(cmd)
             last_played = selected
             continue
 
 
 def _play_command(args: argparse.Namespace) -> int:
-    return _play_menu(args.config, args.path, getattr(args, "read_ahead_queue_size", None))
+    clock = getattr(args, "clock", True)
+    if clock is None:
+        clock = True
+    return _play_menu(
+        args.config,
+        args.path,
+        getattr(args, "read_ahead_queue_size", None),
+        clock=clock,
+        filter_topics=getattr(args, "topics", None),
+    )
 
 
 def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int:
@@ -1447,6 +1670,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=10000,
         help="Queue size for pre-fetching messages to prevent starvation on compressed bags (default: 10000)",
     )
+    bag_play.add_argument(
+        "--clock",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Publish clock topic (default: True)",
+    )
+    bag_play.add_argument(
+        "--topics",
+        nargs="*",
+        help="Filter specific topics to play",
+    )
     bag_play.set_defaults(func=_bag_play)
 
     play_parser = subparsers.add_parser("play", help="Select and play a bag")
@@ -1456,6 +1690,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10000,
         help="Queue size for pre-fetching messages (default: 10000)",
+    )
+    play_parser.add_argument(
+        "--clock",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Publish clock topic (default: True)",
+    )
+    play_parser.add_argument(
+        "--topics",
+        nargs="*",
+        help="Filter specific topics to play (skips interactive filter checklist)",
     )
     play_parser.set_defaults(func=_play_command)
 
