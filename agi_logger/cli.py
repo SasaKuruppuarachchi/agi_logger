@@ -692,6 +692,8 @@ def _prompt_tcp_after_settings(
         full_key = f"agi_logger.tcp_file_communication.{mode}.{key}"
         color = YELLOW if highlight_keys and full_key in highlight_keys else LIGHT_GRAY
         print(f"{CYAN}- {key:<20}{RESET}: {color}{val_str}{RESET}")
+    if mode == "server":
+        print(f"\n{LIGHT_GRAY}Notice: If the host IP cannot be bound, fallback to Bind Host: 0.0.0.0 (listens on all interfaces).{RESET}")
 
     action = input(
         f"\n{BOLD}Continue?{RESET} [Enter = Start Transfer / e = Edit / s = Save & Return / n = Back]: "
@@ -991,7 +993,8 @@ def _tcp_server_flow(config_path: Path) -> None:
                 sz = _get_item_size_str(sp)
                 print(f"  {idx}. {GREEN}{sp.name}{RESET} ({sz})")
 
-            print(f"\n{BOLD}Options:{RESET} [Enter = Start / 1 = Change Host / 2 = Change Port / r = Reselect Bags / s = Save Config / n = Back]")
+            print(f"\n{LIGHT_GRAY}Notice: If the host IP cannot be bound, fallback to Bind Host: 0.0.0.0 (listens on all network interfaces).{RESET}")
+            print(f"{BOLD}Options:{RESET} [Enter = Start / 1 = Change Host / 2 = Change Port / r = Reselect Bags / s = Save Config / n = Back]")
             action = input(f"{BOLD}Select action:{RESET} ").strip().lower()
 
             if action in {"1", "h", "host"}:

@@ -139,7 +139,15 @@ def send_file(server: TcpServerConfig) -> str:
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((server.host, server.port))
+        try:
+            sock.bind((server.host, server.port))
+        except OSError as exc:
+            if server.host not in ("0.0.0.0", ""):
+                raise TcpTransferError(
+                    f"Failed to bind to host '{server.host}:{server.port}' ({exc}). "
+                    f"If the host IP cannot be bound, fallback to Bind Host: 0.0.0.0"
+                ) from exc
+            raise TcpTransferError(f"Failed to bind to {server.host}:{server.port}: {exc}") from exc
         sock.listen(1)
         sock.settimeout(0.2)
 

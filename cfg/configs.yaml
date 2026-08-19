@@ -39,6 +39,6 @@ agi_logger:
       port: 6000
       file_path: /workspaces/logging/bags/agi_log_20260128_115034_climb_test
     client:
-      host: localhost
+      host: 192.168.0.85
       port: 6000
-      destination_path: ~/workspace/logging/bags/test_receive
+      destination_path: /workspaces/logging/test_recieve
