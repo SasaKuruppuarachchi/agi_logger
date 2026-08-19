@@ -3,25 +3,11 @@ agi_logger:
   logger:
     bag_path: /workspaces/logging/test_bags
     topics:
-    - /clock
-    - /fmu/out/vehicle_control_mode
-    - /fmu/out/vehicle_status
-    - /drone0/RealSense_Camera/color/camera_info
-    - /drone0/RealSense_Camera/color/image_raw
-    - /drone0/RealSense_Camera/depth
-    - /drone0/alert_event
-    - /drone0/dynamic_map/voxel_map
-    - /drone0/fast_lio/Laser_map
-    - /drone0/fast_lio/imu_odometry
     - /drone0/livox/lidar
     - /drone0/livox/imu
-    - /drone0/self_localization/pose
-    - /drone0/sensor_measurements/imu
-    - /drone0/navigation_runner/goal
-    - /drone0/self_localization/path
-    - /tf
-    - /tf_static
-    name: test_log
+    - /fmu/out/sensor_combined
+    - /drone0/px4_imu
+    name: lio_test_w_sync
     max_bag_size: 1
     override_qos: false
     qos_settings: cfg/qos_profiles.yaml
@@ -38,6 +24,7 @@ agi_logger:
     server:
       port: 6000
       file_path: /workspaces/logging/bags/agi_log_20260128_115034_climb_test
+      host: 0.0.0.0
     client:
       host: 192.168.0.85
       port: 6000
