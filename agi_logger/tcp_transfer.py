@@ -97,6 +97,29 @@ def _send_single_item(client_socket: socket.socket, file_path: Path, item_prefix
             temp_tar_path.unlink()
 
 
+def get_host_ips() -> List[str]:
+    """Returns detected IP addresses of the host machine."""
+    ips: List[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            primary_ip = s.getsockname()[0]
+            if primary_ip and primary_ip not in ips:
+                ips.append(primary_ip)
+    except Exception:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for ip in socket.gethostbyname_ex(hostname)[2]:
+            if not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+
+    return ips or ["127.0.0.1"]
+
+
 def send_file(server: TcpServerConfig) -> str:
     raw_paths: List[str] = []
     if server.file_paths:
@@ -120,10 +143,15 @@ def send_file(server: TcpServerConfig) -> str:
         sock.listen(1)
         sock.settimeout(0.2)
 
+        host_ips = get_host_ips()
+        host_ip_str = ", ".join(host_ips)
+        primary_ip = host_ips[0] if host_ips else server.host
         names_summary = ", ".join(p.name for p in valid_paths[:3])
         if len(valid_paths) > 3:
             names_summary += f", ... (+{len(valid_paths) - 3} more)"
+        print(f"\n{BOLD}{CYAN}Server Host IP:{RESET} {BOLD}{GREEN}{host_ip_str}{RESET}")
         print(f"Server listening on {server.host}:{server.port} (Ready to serve {len(valid_paths)} item(s): {names_summary})")
+        print(f"{LIGHT_GRAY}Connect from client using: agi-logger tcp receive --host {primary_ip} --port {server.port}{RESET}")
         print(f"\n{LIGHT_GRAY}[Listening] Press 'm' for main menu | 'q' to quit | or wait for connection...{RESET}\n")
 
         fd = None

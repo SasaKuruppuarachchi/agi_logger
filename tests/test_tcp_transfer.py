@@ -6,9 +6,19 @@ import pytest
 from agi_logger.tcp_transfer import (
     TcpClientConfig,
     TcpServerConfig,
+    get_host_ips,
     receive_file,
     send_file,
 )
+
+
+def test_get_host_ips():
+    ips = get_host_ips()
+    assert isinstance(ips, list)
+    assert len(ips) > 0
+    for ip in ips:
+        assert isinstance(ip, str)
+        assert len(ip.split(".")) == 4
 
 
 def test_tcp_transfer_single_file(tmp_path):

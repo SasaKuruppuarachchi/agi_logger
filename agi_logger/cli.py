@@ -29,7 +29,13 @@ from .config import (
 )
 from .logging_manager import RecorderManager
 from .system_monitor import check_system_resources, get_system_resources
-from .tcp_transfer import TcpClientConfig, TcpServerConfig, receive_file, send_file
+from .tcp_transfer import (
+    TcpClientConfig,
+    TcpServerConfig,
+    get_host_ips,
+    receive_file,
+    send_file,
+)
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -678,6 +684,9 @@ def _prompt_tcp_after_settings(
     tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
     mode_cfg = tcp_cfg.get(mode, {})
     print(f"\n{BOLD}{CYAN}TCP {mode.title()} Settings Preview{RESET}")
+    if mode == "server":
+        host_ip_str = ", ".join(get_host_ips())
+        print(f"{CYAN}- {'server_host_ip':<20}{RESET}: {BOLD}{GREEN}{host_ip_str}{RESET}")
     for key, value in mode_cfg.items():
         val_str = _format_display_value(value)
         full_key = f"agi_logger.tcp_file_communication.{mode}.{key}"
@@ -966,73 +975,82 @@ def _tcp_server_flow(config_path: Path) -> None:
         return
 
     is_dirty = False
+    host_ips = get_host_ips()
+    host_ip_str = ", ".join(host_ips)
 
     while True:
-        _clear_screen()
-        print(f"\n{BOLD}{CYAN}TCP Server Transfer Preview{RESET}")
-        print(f"{CYAN}1) Bind Host  :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{host}{RESET}")
-        print(f"{CYAN}2) Port       :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{port}{RESET}")
-        print(f"{CYAN}3) Directory  :{RESET} {LIGHT_GRAY}{chosen_dir}{RESET}")
-        print(f"{CYAN}Selected ({len(selected_paths)} item(s)):{RESET}")
-        for idx, sp in enumerate(selected_paths, start=1):
-            sz = _get_item_size_str(sp)
-            print(f"  {idx}. {GREEN}{sp.name}{RESET} ({sz})")
+        try:
+            _clear_screen()
+            print(f"\n{BOLD}{CYAN}TCP Server Transfer Preview{RESET}")
+            print(f"{CYAN}Server/Host IP:{RESET} {BOLD}{GREEN}{host_ip_str}{RESET}")
+            print(f"{CYAN}1) Bind Host  :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{host}{RESET}")
+            print(f"{CYAN}2) Port       :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{port}{RESET}")
+            print(f"{CYAN}3) Directory  :{RESET} {LIGHT_GRAY}{chosen_dir}{RESET}")
+            print(f"{CYAN}Selected ({len(selected_paths)} item(s)):{RESET}")
+            for idx, sp in enumerate(selected_paths, start=1):
+                sz = _get_item_size_str(sp)
+                print(f"  {idx}. {GREEN}{sp.name}{RESET} ({sz})")
 
-        print(f"\n{BOLD}Options:{RESET} [Enter = Start / 1 = Change Host / 2 = Change Port / r = Reselect Bags / s = Save Config / n = Back]")
-        action = input(f"{BOLD}Select action:{RESET} ").strip().lower()
+            print(f"\n{BOLD}Options:{RESET} [Enter = Start / 1 = Change Host / 2 = Change Port / r = Reselect Bags / s = Save Config / n = Back]")
+            action = input(f"{BOLD}Select action:{RESET} ").strip().lower()
 
-        if action in {"1", "h", "host"}:
-            new_host = input(f"Enter bind host IP [{host}]: ").strip()
-            if new_host:
-                host = new_host
-                is_dirty = True
-            continue
-
-        if action in {"2", "p", "port"}:
-            new_port_str = input(f"Enter server port [{port}]: ").strip()
-            if new_port_str:
-                try:
-                    port = int(new_port_str)
+            if action in {"1", "h", "host"}:
+                new_host = input(f"Enter bind host IP [{host}] (detected host IP: {host_ip_str}): ").strip()
+                if new_host:
+                    host = new_host
                     is_dirty = True
-                except ValueError:
-                    print(f"{RED}Invalid port number{RESET}")
-                    time.sleep(0.8)
-            continue
+                continue
 
-        if action in {"r", "e", "reselect"}:
-            new_selected, chosen_dir = _select_bags_interactive(chosen_dir)
-            if new_selected:
-                selected_paths = new_selected
-            continue
+            if action in {"2", "p", "port"}:
+                new_port_str = input(f"Enter server port [{port}]: ").strip()
+                if new_port_str:
+                    try:
+                        port = int(new_port_str)
+                        is_dirty = True
+                    except ValueError:
+                        print(f"{RED}Invalid port number{RESET}")
+                        time.sleep(0.8)
+                continue
 
-        if action in {"s", "save"}:
-            update_nested_value(config, "agi_logger.tcp_file_communication.server.host", host)
-            update_nested_value(config, "agi_logger.tcp_file_communication.server.port", port)
-            save_raw_config(config, config_path)
-            is_dirty = False
-            print(f"{GREEN}Settings saved to config.{RESET}")
-            time.sleep(0.8)
-            continue
+            if action in {"r", "e", "reselect"}:
+                new_selected, chosen_dir = _select_bags_interactive(chosen_dir)
+                if new_selected:
+                    selected_paths = new_selected
+                continue
 
-        if action in {"n", "q", "back"}:
-            break
-
-        if action in {"", "y", "start"}:
-            if is_dirty:
+            if action in {"s", "save"}:
                 update_nested_value(config, "agi_logger.tcp_file_communication.server.host", host)
                 update_nested_value(config, "agi_logger.tcp_file_communication.server.port", port)
                 save_raw_config(config, config_path)
+                is_dirty = False
+                print(f"{GREEN}Settings saved to config.{RESET}")
+                time.sleep(0.8)
+                continue
 
-            server = TcpServerConfig(
-                host=host,
-                port=port,
-                file_paths=[str(p) for p in selected_paths],
-            )
-            try:
-                send_file(server)
-            except Exception as exc:
-                print(f"\n{RED}Transfer error: {exc}{RESET}")
-            input(f"\n{LIGHT_GRAY}Press Enter to continue...{RESET}")
+            if action in {"n", "q", "back"}:
+                break
+
+            if action in {"", "y", "start"}:
+                if is_dirty:
+                    update_nested_value(config, "agi_logger.tcp_file_communication.server.host", host)
+                    update_nested_value(config, "agi_logger.tcp_file_communication.server.port", port)
+                    save_raw_config(config, config_path)
+
+                server = TcpServerConfig(
+                    host=host,
+                    port=port,
+                    file_paths=[str(p) for p in selected_paths],
+                )
+                try:
+                    send_file(server)
+                except Exception as exc:
+                    print(f"\n{RED}Transfer error: {exc}{RESET}")
+                try:
+                    input(f"\n{LIGHT_GRAY}Press Enter to continue...{RESET}")
+                except KeyboardInterrupt:
+                    pass
+                break
+        except KeyboardInterrupt:
             break
 
 
@@ -1046,83 +1064,92 @@ def _tcp_client_flow(config_path: Path) -> None:
     dest = str(client_cfg.get("destination_path", "."))
 
     is_dirty = False
+    host_ips = get_host_ips()
+    host_ip_str = ", ".join(host_ips)
 
     while True:
-        _clear_screen()
-        print(f"\n{BOLD}{CYAN}TCP Client (Receive) Settings Preview{RESET}")
-        print(f"{CYAN}1) Server Host IP  :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{host}{RESET}")
-        print(f"{CYAN}2) Server Port     :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{port}{RESET}")
-        print(f"{CYAN}3) Destination Path:{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{dest}{RESET}")
+        try:
+            _clear_screen()
+            print(f"\n{BOLD}{CYAN}TCP Client (Receive) Settings Preview{RESET}")
+            print(f"{CYAN}Client Host IP     :{RESET} {BOLD}{GREEN}{host_ip_str}{RESET}")
+            print(f"{CYAN}1) Server Host IP  :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{host}{RESET}")
+            print(f"{CYAN}2) Server Port     :{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{port}{RESET}")
+            print(f"{CYAN}3) Destination Path:{RESET} {YELLOW if is_dirty else LIGHT_GRAY}{dest}{RESET}")
 
-        print(f"\n{BOLD}Options:{RESET} [Enter = Start / 1 = Change Host / 2 = Change Port / 3 = Change Dest / e = Settings Menu / s = Save Config / n = Back]")
-        action = input(f"{BOLD}Select action:{RESET} ").strip().lower()
+            print(f"\n{BOLD}Options:{RESET} [Enter = Start / 1 = Change Host / 2 = Change Port / 3 = Change Dest / e = Settings Menu / s = Save Config / n = Back]")
+            action = input(f"{BOLD}Select action:{RESET} ").strip().lower()
 
-        if action in {"1", "h", "host"}:
-            new_host = input(f"Enter server host IP [{host}]: ").strip()
-            if new_host:
-                host = new_host
-                is_dirty = True
-            continue
-
-        if action in {"2", "p", "port"}:
-            new_port_str = input(f"Enter server port [{port}]: ").strip()
-            if new_port_str:
-                try:
-                    port = int(new_port_str)
+            if action in {"1", "h", "host"}:
+                new_host = input(f"Enter server host IP [{host}]: ").strip()
+                if new_host:
+                    host = new_host
                     is_dirty = True
-                except ValueError:
-                    print(f"{RED}Invalid port number{RESET}")
-                    time.sleep(0.8)
-            continue
+                continue
 
-        if action in {"3", "d", "dest"}:
-            new_dest = input(f"Enter destination path [{dest}]: ").strip()
-            if new_dest:
-                dest = str(Path(new_dest).expanduser().resolve())
-                is_dirty = True
-            continue
+            if action in {"2", "p", "port"}:
+                new_port_str = input(f"Enter server port [{port}]: ").strip()
+                if new_port_str:
+                    try:
+                        port = int(new_port_str)
+                        is_dirty = True
+                    except ValueError:
+                        print(f"{RED}Invalid port number{RESET}")
+                        time.sleep(0.8)
+                continue
 
-        if action == "e":
-            _settings_menu(config_path, start_section="tcp_client")
-            config = _load_config(config_path)
-            tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
-            client_cfg = tcp_cfg.get("client", {})
-            host = str(client_cfg.get("host", "localhost"))
-            port = int(client_cfg.get("port", 6000))
-            dest = str(client_cfg.get("destination_path", "."))
-            is_dirty = False
-            continue
+            if action in {"3", "d", "dest"}:
+                new_dest = input(f"Enter destination path [{dest}]: ").strip()
+                if new_dest:
+                    dest = str(Path(new_dest).expanduser().resolve())
+                    is_dirty = True
+                continue
 
-        if action in {"s", "save"}:
-            update_nested_value(config, "agi_logger.tcp_file_communication.client.host", host)
-            update_nested_value(config, "agi_logger.tcp_file_communication.client.port", port)
-            update_nested_value(config, "agi_logger.tcp_file_communication.client.destination_path", dest)
-            save_raw_config(config, config_path)
-            is_dirty = False
-            print(f"{GREEN}Settings saved to config.{RESET}")
-            time.sleep(0.8)
-            continue
+            if action == "e":
+                _settings_menu(config_path, start_section="tcp_client")
+                config = _load_config(config_path)
+                tcp_cfg = config.get("agi_logger", {}).get("tcp_file_communication", {})
+                client_cfg = tcp_cfg.get("client", {})
+                host = str(client_cfg.get("host", "localhost"))
+                port = int(client_cfg.get("port", 6000))
+                dest = str(client_cfg.get("destination_path", "."))
+                is_dirty = False
+                continue
 
-        if action in {"n", "q", "back"}:
-            break
-
-        if action in {"", "y", "start"}:
-            if is_dirty:
+            if action in {"s", "save"}:
                 update_nested_value(config, "agi_logger.tcp_file_communication.client.host", host)
                 update_nested_value(config, "agi_logger.tcp_file_communication.client.port", port)
                 update_nested_value(config, "agi_logger.tcp_file_communication.client.destination_path", dest)
                 save_raw_config(config, config_path)
+                is_dirty = False
+                print(f"{GREEN}Settings saved to config.{RESET}")
+                time.sleep(0.8)
+                continue
 
-            client = TcpClientConfig(
-                host=host,
-                port=port,
-                destination_path=dest,
-            )
-            try:
-                receive_file(client)
-            except Exception as exc:
-                print(f"\n{RED}Transfer error: {exc}{RESET}")
-            input(f"\n{LIGHT_GRAY}Press Enter to continue...{RESET}")
+            if action in {"n", "q", "back"}:
+                break
+
+            if action in {"", "y", "start"}:
+                if is_dirty:
+                    update_nested_value(config, "agi_logger.tcp_file_communication.client.host", host)
+                    update_nested_value(config, "agi_logger.tcp_file_communication.client.port", port)
+                    update_nested_value(config, "agi_logger.tcp_file_communication.client.destination_path", dest)
+                    save_raw_config(config, config_path)
+
+                client = TcpClientConfig(
+                    host=host,
+                    port=port,
+                    destination_path=dest,
+                )
+                try:
+                    receive_file(client)
+                except Exception as exc:
+                    print(f"\n{RED}Transfer error: {exc}{RESET}")
+                try:
+                    input(f"\n{LIGHT_GRAY}Press Enter to continue...{RESET}")
+                except KeyboardInterrupt:
+                    pass
+                break
+        except KeyboardInterrupt:
             break
 
 
@@ -1315,14 +1342,18 @@ def _play_command(args: argparse.Namespace) -> int:
 
 def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int:
     while True:
-        _clear_screen()
-        _print_title()
-        print(f"{GREEN}1){RESET} Record")
-        print(f"{GREEN}2){RESET} Transfer")
-        print(f"{GREEN}3){RESET} Play")
-        print(f"{GREEN}4){RESET} Settings")
-        print(f"{GREEN}5){RESET} Exit")
-        choice = input(f"\n{BOLD}Select option:{RESET} ").strip()
+        try:
+            _clear_screen()
+            _print_title()
+            print(f"{GREEN}1){RESET} Record")
+            print(f"{GREEN}2){RESET} Transfer")
+            print(f"{GREEN}3){RESET} Play")
+            print(f"{GREEN}4){RESET} Settings")
+            print(f"{GREEN}5){RESET} Exit")
+            choice = input(f"\n{BOLD}Select option:{RESET} ").strip()
+        except KeyboardInterrupt:
+            print("\nExiting.")
+            return 0
 
         if choice == "1":
             _record_preview(parser.parse_args(["--config", str(config_path), "record"]))
@@ -1330,12 +1361,16 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
 
         if choice == "2":
             while True:
-                _clear_screen()
-                print(f"\n{BOLD}{CYAN}TCP Transfer Menu{RESET}")
-                print(f"{GREEN}1){RESET} Server (Select & Send Bags)")
-                print(f"{GREEN}2){RESET} Client (Receive Bags)")
-                print(f"{GREEN}3){RESET} Back")
-                sub = input(f"\n{BOLD}Select option:{RESET} ").strip()
+                try:
+                    _clear_screen()
+                    print(f"\n{BOLD}{CYAN}TCP Transfer Menu{RESET}")
+                    print(f"{GREEN}1){RESET} Server (Select & Send Bags)")
+                    print(f"{GREEN}2){RESET} Client (Receive Bags)")
+                    print(f"{GREEN}3){RESET} Back")
+                    sub = input(f"\n{BOLD}Select option:{RESET} ").strip()
+                except KeyboardInterrupt:
+                    break
+
                 if sub == "3" or sub == "":
                     break
                 if sub not in {"1", "2"}:
