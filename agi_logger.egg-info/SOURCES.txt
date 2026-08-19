@@ -6,6 +6,7 @@ agi_logger/cli.py
 agi_logger/config.py
 agi_logger/logging_manager.py
 agi_logger/ros2_node.py
+agi_logger/system_monitor.py
 agi_logger/tcp_transfer.py
 agi_logger.egg-info/PKG-INFO
 agi_logger.egg-info/SOURCES.txt
@@ -16,5 +17,6 @@ agi_logger.egg-info/top_level.txt
 tests/test_cli_helpers.py
 tests/test_config.py
 tests/test_logging_manager.py
+tests/test_manual_recording.py
 tests/test_ros2_node.py
 tests/test_tcp_transfer.py

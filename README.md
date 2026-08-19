@@ -24,9 +24,9 @@
 ## 🌟 Release 1.0 Highlights
 
 - **Interactive Topic Checklist**: Select topics directly from [`cfg/topics_of_interest.yaml`](cfg/topics_of_interest.yaml) using an interactive checkbox tick list (`t` in Record menu).
-- **Autonomous Flight Trigger**: Autostart node listening to both Aerostack2 (`/drone0/platform/info`) and PX4 (`/fmu/out/vehicle_status`) with `BEST_EFFORT` and `VOLATILE` QoS.
-- **Hardware Health Monitoring at 0.1 Hz**: Real-time RAM and disk usage tracking every 10 seconds with colorized warnings (red) and automatic emergency stop on critical resource exhaustion.
-- **Interactive Disarm Controls**: On disarm, choose between continuing background monitoring, pressing **`m`** to return to the main menu, or **`q`** to exit cleanly.
+- **Autonomous Flight Trigger & Manual Recording**: Supports both telemetry-driven autostart (Aerostack2/PX4) and direct foreground manual recording with unified controls.
+- **Hardware Health Monitoring at 0.1 Hz**: Real-time RAM and disk usage tracking every 10 seconds in both autostart and manual recording modes, with colorized warnings (red) and automatic emergency stop on critical resource exhaustion.
+- **Interactive Navigation Controls**: Press **`m`** to return to the interactive main menu or **`q`** to cleanly stop recording/monitoring and exit.
 - **Queue-Starvation Prevention in Playback**: Pre-configured `--read-ahead-queue-size 10000` eliminates stuttering and warnings during compressed bag playback.
 - **TCP Multi-Bag Batch Transfer**: Interactive checkbox selector for transferring multiple bag directories in a single connection with live progress metrics and inline Host/Port editing.
 - **Process Group Isolation**: Recorder child processes run in isolated process groups (`start_new_session=True`), preventing orphaned rosbag processes on exit.
@@ -131,17 +131,16 @@ graph TD
 - **Storage & Compression**: Native support for `MCAP` storage plugin, `zstd` compression, QoS profile overrides (`--qos-profile-overrides-path`), and maximum duration/size split limits.
 - **Metadata Injection**: Generates an atomic `metadata.json` containing operator credentials, hostname, Git commit hash, flight tags, and timestamps.
 
-### 2. Autonomous ROS 2 Autostart Node (`AutoStartLoggerNode`)
-- **Dual Telemetry Detection**: Compatible with both Aerostack2 platform telemetry (`as2_msgs/msg/PlatformInfo` on `/drone0/platform/info`) and PX4 autopilot telemetry (`px4_msgs/msg/VehicleStatus` on `/fmu/out/vehicle_status`).
+### 2. Autonomous Autostart & Manual Recording Engine
+- **Autonomous Trigger**: Compatible with both Aerostack2 platform telemetry (`as2_msgs/msg/PlatformInfo` on `/drone0/platform/info`) and PX4 autopilot telemetry (`px4_msgs/msg/VehicleStatus` on `/fmu/out/vehicle_status`).
 - **Resource Monitoring Guard (0.1 Hz)**:
-  - Samples available RAM (from `/proc/meminfo`) and storage at target path (via `shutil.disk_usage`) every 10 seconds.
+  - Continuously samples available RAM (from `/proc/meminfo`) and target bag disk storage (via `shutil.disk_usage`) every 10 seconds during both autostart and foreground manual recording.
   - **Low Warning (in Red)**: Raised when Storage < 10.0 GB or RAM < 1.0 GB.
-  - **Critical Emergency Safe Stop**: Triggered when Storage < 2.0 GB or RAM < 300 MB, safely executing `manager.stop_recording()` to prevent data loss or disk saturation.
-- **Interactive Disarmed State Navigation**:
-  - `[Awaiting Arm] Press 'm' for main menu | 'q' to quit | or wait for next arm...`
-  - Pressing **`m`** cleanly transitions to the interactive menu.
-  - Pressing **`q`** cleanly shuts down the node.
-  - Pressing nothing continues background monitoring.
+  - **Critical Emergency Safe Stop**: Triggered when Storage < 2.0 GB or RAM < 300 MB, safely executing `manager.stop_recording()` to protect data and system stability.
+- **Interactive Navigation Controls (`q` / `m`)**:
+  - `[Recording Active / Awaiting Arm] Press 'm' for main menu | 'q' to quit`:
+  - Pressing **`m`** stops recording/monitoring safely and opens the interactive main menu.
+  - Pressing **`q`** stops recording/monitoring cleanly and exits the application.
 
 ### 3. TCP Batch Transfer Engine (`tcp_transfer`)
 - **Streaming Pipeline**: Archives bag folders on-the-fly into gzip archives, streams over socket, and extracts directly into target directories on the receiving client.
@@ -223,10 +222,19 @@ tests/test_config.py::test_resolve_paths PASSED
 tests/test_logging_manager.py::test_build_command_basic PASSED
 tests/test_logging_manager.py::test_build_command_comma_separated_topics PASSED
 tests/test_logging_manager.py::test_write_metadata PASSED
+tests/test_manual_recording.py::test_system_monitor_ok PASSED
+tests/test_manual_recording.py::test_system_monitor_warning PASSED
+tests/test_manual_recording.py::test_system_monitor_critical PASSED
+tests/test_manual_recording.py::test_manual_recording_already_recording PASSED
+tests/test_manual_recording.py::test_manual_recording_press_q PASSED
+tests/test_manual_recording.py::test_manual_recording_press_m PASSED
+tests/test_manual_recording.py::test_manual_recording_critical_resource_stop PASSED
+tests/test_manual_recording.py::test_record_start_background PASSED
+tests/test_manual_recording.py::test_record_start_foreground_menu PASSED
 tests/test_ros2_node.py::test_get_system_resources PASSED
 tests/test_ros2_node.py::test_resource_threshold_constants PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_single_file PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_directory_bag PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_multiple_bags_batch PASSED
-============= 15 passed in 1.00s ==============
+============= 24 passed in 1.00s ==============
 ```

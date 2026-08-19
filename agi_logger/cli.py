@@ -28,6 +28,7 @@ from .config import (
     update_nested_value,
 )
 from .logging_manager import RecorderManager
+from .system_monitor import check_system_resources, get_system_resources
 from .tcp_transfer import TcpClientConfig, TcpServerConfig, receive_file, send_file
 
 RESET = "\033[0m"
@@ -477,10 +478,118 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
         start_section = None
 
 
+def run_manual_recording(config_path: Path) -> str:
+    config = _load_config(config_path)
+    logger_cfg = resolve_logger_paths(config, config_path)
+    bag_path = str(logger_cfg.get("bag_path", "/workspaces/logging/test_bags"))
+    manager = RecorderManager(config, config_path)
+
+    if manager.is_recording():
+        print(f"{RED}Recording already active! Stop existing recording first.{RESET}")
+        return "exit"
+
+    state = manager.start_recording(verbose=True, foreground=False)
+    print(f"\nStarted recording: {BOLD}{GREEN}{state.bag_name}{RESET} (PID {state.pid})")
+    print(
+        f"\n{BOLD}{CYAN}[Recording Active]{RESET} "
+        f"Press {BOLD}{GREEN}'m'{RESET} for main menu | {BOLD}{RED}'q'{RESET} to quit | or wait for recording to finish..."
+    )
+
+    action: Optional[str] = None
+    is_tty = sys.stdin.isatty()
+    old_settings = None
+    if is_tty:
+        try:
+            old_settings = termios.tcgetattr(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno())
+        except Exception:
+            old_settings = None
+
+    last_monitor_time = time.time()
+    try:
+        while manager.is_recording():
+            current_time = time.time()
+            if current_time - last_monitor_time >= 10.0:
+                last_monitor_time = current_time
+                status, _ = check_system_resources(bag_path, print_output=True)
+                if status == "critical":
+                    print(f"\n{BOLD}{RED}Emergency stop triggered by critical resource limit.{RESET}")
+                    manager.stop_recording()
+                    break
+
+            if is_tty:
+                readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if readable:
+                    char = sys.stdin.read(1)
+                    if char in ("m", "M"):
+                        print(f"\n{BOLD}{GREEN}Option 'm' pressed: returning to main menu...{RESET}")
+                        manager.stop_recording()
+                        action = "menu"
+                        break
+                    elif char in ("q", "Q"):
+                        print(f"\n{BOLD}{RED}Option 'q' pressed: exiting recording...{RESET}")
+                        manager.stop_recording()
+                        action = "exit"
+                        break
+            else:
+                time.sleep(0.1)
+
+        # If recording ended naturally or via critical resource stop without explicit keypress
+        if action is None:
+            print(f"\n{BOLD}{GREEN}Recording completed/stopped.{RESET}")
+            if is_tty:
+                print(
+                    f"\n{BOLD}{YELLOW}[Recording Stopped]{RESET} "
+                    f"Press {BOLD}{GREEN}'m'{RESET} for main menu | {BOLD}{RED}'q'{RESET} to quit..."
+                )
+                while True:
+                    readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+                    if readable:
+                        char = sys.stdin.read(1)
+                        if char in ("m", "M"):
+                            print(f"\n{BOLD}{GREEN}Option 'm' pressed: returning to main menu...{RESET}")
+                            action = "menu"
+                            break
+                        elif char in ("q", "Q", "\n", "\r"):
+                            print(f"\n{BOLD}{RED}Option 'q' pressed: exiting...{RESET}")
+                            action = "exit"
+                            break
+            else:
+                action = "exit"
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}Keyboard interrupt received: stopping recording...{RESET}")
+        if manager.is_recording():
+            try:
+                manager.stop_recording()
+            except Exception:
+                pass
+        action = "exit"
+    finally:
+        if old_settings is not None:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
+            except Exception:
+                pass
+        if manager.is_recording():
+            try:
+                manager.stop_recording()
+            except Exception:
+                pass
+
+    return action or "exit"
+
+
 def _record_start(args: argparse.Namespace) -> int:
-    manager = _get_manager(args.config)
-    state = manager.start_recording(verbose=True, foreground=not args.background)
-    print(f"Started recording: {state.bag_name}")
+    if args.background:
+        manager = _get_manager(args.config)
+        state = manager.start_recording(verbose=True, foreground=False)
+        print(f"Started recording: {state.bag_name} (PID {state.pid})")
+        return 0
+
+    result = run_manual_recording(args.config)
+    if result == "menu":
+        parser = build_parser()
+        return _interactive_menu(parser, args.config)
     return 0
 
 
