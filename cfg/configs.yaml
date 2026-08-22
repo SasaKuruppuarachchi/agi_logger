@@ -1,7 +1,7 @@
 agi_logger:
   verbosity: INFO
   logger:
-    bag_path: /workspaces/logging/test_bags
+    bag_path: /workspaces/logging/test_bags/after_fix_1_and_2
     topics:
     - /drone0/livox/lidar
     - /drone0/livox/imu

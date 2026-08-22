@@ -145,8 +145,8 @@ graph TD
   - Pressing **`q`** stops recording/monitoring cleanly and exits the application.
 
 ### 3. TCP Batch Transfer Engine (`tcp_transfer`)
-- **Streaming Pipeline**: Archives bag folders on-the-fly into gzip archives, streams over socket, and extracts directly into target directories on the receiving client.
-- **Batch Transfer Protocol**: Multi-bag transfers (`BATCH:<count>`) synchronized with line-delimited control messages to avoid TCP stream frame overlap.
+- **Direct Streaming Pipeline**: Streams bag directory tar archives on-the-fly directly over the TCP socket with chunked framing, extracting in real time onto the receiving client without writing temporary archive files or CPU-heavy compression delays.
+- **Batch Transfer Protocol**: Multi-bag transfers (`BATCH:<count>`) synchronized with line-delimited control messages and chunked frame boundaries to prevent socket frame overlap.
 - **Interactive Multi-Select Checklist**: Checkbox tick-list with directory navigation and direct inline editing of Host IP and Port on the preview screen.
 
 ### 4. Interactive Bag Playback (`_play_menu`)
@@ -243,5 +243,7 @@ tests/test_tcp_transfer.py::test_get_host_ips PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_single_file PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_directory_bag PASSED
 tests/test_tcp_transfer.py::test_tcp_transfer_multiple_bags_batch PASSED
-============= 27 passed in 1.06s ==============
+tests/test_tcp_transfer.py::test_tcp_transfer_mixed_batch_with_nested_directories PASSED
+tests/test_tcp_transfer.py::test_version_compatibility_check PASSED
+============= 29 passed in 1.48s ==============
 ```

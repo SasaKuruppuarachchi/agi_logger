@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import sqlite3
 import yaml
 
+from . import __version__
 from .config import (
     DEFAULT_CONFIG_PATH,
     ConfigError,
@@ -1630,6 +1631,11 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agi-logger", description="AGI logger CLI")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     parser.add_argument(
         "--config",
         type=Path,

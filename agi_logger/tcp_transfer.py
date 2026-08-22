@@ -4,16 +4,19 @@ import select
 import socket
 import sys
 import tarfile
-import tempfile
 import termios
 import tty
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
 
+from . import __version__
+
 RESET = "\033[0m"
 BOLD = "\033[1m"
+RED = "\033[31m"
 GREEN = "\033[32m"
+YELLOW = "\033[33m"
 CYAN = "\033[36m"
 LIGHT_GRAY = "\033[90m"
 
@@ -56,35 +59,147 @@ def _recv_line(sock: socket.socket) -> str:
     return buf.decode("utf-8").strip()
 
 
+def _check_version_compatibility(peer_line: str, role: str) -> Optional[str]:
+    """Validates remote peer version against local version and warns if mismatch."""
+    peer_version = None
+    if peer_line.startswith("AGI_LOGGER_VERSION:"):
+        peer_version = peer_line.split(":", 1)[1].strip()
+
+    if not peer_version:
+        print(
+            f"{BOLD}{YELLOW}[WARNING] {role} did not report an agi-logger version (received: '{peer_line}').\n"
+            f"          Remote may be running an incompatible version. Transfer may be defective!{RESET}"
+        )
+        return None
+
+    if peer_version != __version__:
+        print(
+            f"{BOLD}{YELLOW}[WARNING] Version mismatch detected! Local agi-logger is v{__version__}, but {role} is v{peer_version}.\n"
+            f"          Transfer may be defective due to protocol/version differences!{RESET}"
+        )
+    return peer_version
+
+
+def _get_dir_uncompressed_size(dir_path: Path) -> int:
+    """Calculates total uncompressed byte size of all files in a directory."""
+    return sum(f.stat().st_size for f in dir_path.rglob("*") if f.is_file())
+
+
+class _ChunkedSocketWriter:
+    """File-like stream wrapper that writes chunked tar stream frames directly to a socket with live progress."""
+
+    def __init__(self, sock: socket.socket, total_size: int, item_name: str, prefix: str = "") -> None:
+        self._sock = sock
+        self._total_size = total_size
+        self._item_name = item_name
+        self._prefix = prefix
+        self._sent = 0
+
+    def write(self, data: bytes) -> int:
+        if not data:
+            return 0
+        header = f"{len(data):x}\n".encode("ascii")
+        self._sock.sendall(header + data)
+        self._sent += len(data)
+        pct = (self._sent / self._total_size) * 100 if self._total_size > 0 else 100
+        print(f"{self._prefix}Streaming {self._item_name}: {self._sent}/{self._total_size} bytes ({pct:.1f}%)", end="\r")
+        return len(data)
+
+    def finish(self) -> None:
+        """Sends terminal chunk to signal end of stream."""
+        self._sock.sendall(b"0\n")
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _ChunkedSocketReader:
+    """File-like stream wrapper that reads chunked stream frames from a socket with live progress."""
+
+    def __init__(self, sock: socket.socket, total_size: int, item_name: str, prefix: str = "") -> None:
+        self._sock = sock
+        self._total_size = total_size
+        self._item_name = item_name
+        self._prefix = prefix
+        self._current_chunk_remain = 0
+        self._eof = False
+        self._received = 0
+
+    def _read_chunk_header(self) -> int:
+        line = bytearray()
+        while True:
+            b = self._sock.recv(1)
+            if not b or b == b"\n":
+                break
+            line.extend(b)
+        line_str = line.decode("ascii").strip()
+        if not line_str:
+            return 0
+        return int(line_str, 16)
+
+    def read(self, size: int = -1) -> bytes:
+        if self._eof:
+            return b""
+        if size is None or size < 0:
+            size = BUFFER_SIZE
+
+        buf = bytearray()
+        while len(buf) < size and not self._eof:
+            if self._current_chunk_remain == 0:
+                chunk_len = self._read_chunk_header()
+                if chunk_len == 0:
+                    self._eof = True
+                    break
+                self._current_chunk_remain = chunk_len
+
+            to_read = min(size - len(buf), self._current_chunk_remain)
+            chunk = self._sock.recv(to_read)
+            if not chunk:
+                self._eof = True
+                break
+            buf.extend(chunk)
+            self._current_chunk_remain -= len(chunk)
+            self._received += len(chunk)
+            pct = (self._received / self._total_size) * 100 if self._total_size > 0 else 100
+            print(f"{self._prefix}Receiving {self._item_name}: {self._received}/{self._total_size} bytes ({pct:.1f}%)", end="\r")
+
+        return bytes(buf)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 def _send_single_item(client_socket: socket.socket, file_path: Path, item_prefix: str = "") -> None:
-    temp_tar_path: Optional[Path] = None
-    try:
-        if file_path.is_dir():
-            print(f"{item_prefix}Archiving directory '{file_path.name}' for transfer...")
-            temp_tar = tempfile.NamedTemporaryFile(
-                suffix=".tar.gz", prefix=f"{file_path.name}_", delete=False
-            )
-            temp_tar_path = Path(temp_tar.name)
-            temp_tar.close()
+    if file_path.is_dir():
+        transfer_size = _get_dir_uncompressed_size(file_path)
+        metadata = f"DIR:{file_path.name}:{transfer_size}"
+        _send_line(client_socket, metadata)
+        ack = _recv_line(client_socket)
+        if ack != "READY":
+            raise TcpTransferError(f"Client rejected item '{file_path.name}' (ack: {ack})")
 
-            with tarfile.open(temp_tar_path, "w:gz") as tar:
-                tar.add(str(file_path), arcname=file_path.name)
+        writer = _ChunkedSocketWriter(client_socket, transfer_size, file_path.name, item_prefix)
+        with tarfile.open(fileobj=writer, mode="w|") as tar:
+            tar.add(str(file_path), arcname=file_path.name)
+        writer.finish()
 
-            transfer_size = temp_tar_path.stat().st_size
-            metadata = f"DIR:{file_path.name}:{transfer_size}"
-            source_path = temp_tar_path
-        else:
-            transfer_size = file_path.stat().st_size
-            metadata = f"FILE:{file_path.name}:{transfer_size}"
-            source_path = file_path
-
+        print(f"\n{item_prefix}Sent directory '{file_path.name}' ({transfer_size} uncompressed bytes) successfully.")
+    else:
+        transfer_size = file_path.stat().st_size
+        metadata = f"FILE:{file_path.name}:{transfer_size}"
         _send_line(client_socket, metadata)
         ack = _recv_line(client_socket)
         if ack != "READY":
             raise TcpTransferError(f"Client rejected item '{file_path.name}' (ack: {ack})")
 
         sent = 0
-        with source_path.open("rb") as handle:
+        with file_path.open("rb") as handle:
             while chunk := handle.read(BUFFER_SIZE):
                 client_socket.sendall(chunk)
                 sent += len(chunk)
@@ -92,9 +207,6 @@ def _send_single_item(client_socket: socket.socket, file_path: Path, item_prefix
                 print(f"{item_prefix}Sending {file_path.name}: {sent}/{transfer_size} bytes ({pct:.1f}%)", end="\r")
 
         print(f"\n{item_prefix}Sent '{file_path.name}' ({transfer_size} bytes) successfully.")
-    finally:
-        if temp_tar_path and temp_tar_path.exists():
-            temp_tar_path.unlink()
 
 
 def get_host_ips() -> List[str]:
@@ -202,6 +314,11 @@ def send_file(server: TcpServerConfig) -> str:
 
                 with client_socket:
                     print(f"\nConnected by {addr}")
+                    # Protocol handshake: Exchange and verify agi-logger versions
+                    _send_line(client_socket, f"AGI_LOGGER_VERSION:{__version__}")
+                    client_ver_line = _recv_line(client_socket)
+                    _check_version_compatibility(client_ver_line, role="Client")
+
                     if len(valid_paths) == 1:
                         _send_single_item(client_socket, valid_paths[0])
                     else:
@@ -264,31 +381,12 @@ def _receive_single_item(sock: socket.socket, destination: Path, raw_meta: str, 
     _send_line(sock, "READY")
 
     if is_dir:
-        temp_tar = tempfile.NamedTemporaryFile(
-            suffix=".tar.gz", prefix=f"recv_{item_name}_", delete=False
-        )
-        temp_tar_path = Path(temp_tar.name)
-        temp_tar.close()
-
-        print(f"{item_prefix}Receiving directory archive '{item_name}' ({file_size} bytes)...")
-        received = 0
-        with temp_tar_path.open("wb") as handle:
-            while received < file_size:
-                chunk = sock.recv(min(BUFFER_SIZE, file_size - received))
-                if not chunk:
-                    break
-                handle.write(chunk)
-                received += len(chunk)
-                pct = (received / file_size) * 100 if file_size > 0 else 100
-                print(f"{item_prefix}Progress: {received}/{file_size} bytes ({pct:.1f}%)", end="\r")
-
-        print(f"\n{item_prefix}Extracting archive into '{destination}'...")
-        with tarfile.open(temp_tar_path, "r:gz") as tar:
+        reader = _ChunkedSocketReader(sock, file_size, item_name, item_prefix)
+        with tarfile.open(fileobj=reader, mode="r|*") as tar:
             tar.extractall(path=str(destination))
-        temp_tar_path.unlink()
 
         output_path = destination / item_name
-        print(f"{item_prefix}Directory '{item_name}' successfully received at: {output_path}")
+        print(f"\n{item_prefix}Directory '{item_name}' successfully received at: {output_path}")
         return output_path
     else:
         output_path = destination / item_name
@@ -315,6 +413,12 @@ def receive_file(client: TcpClientConfig) -> Union[Path, List[Path]]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(60.0)
         sock.connect((client.host, client.port))
+
+        # Protocol handshake: Exchange and verify agi-logger versions
+        server_ver_line = _recv_line(sock)
+        _check_version_compatibility(server_ver_line, role="Server")
+        _send_line(sock, f"AGI_LOGGER_VERSION:{__version__}")
+
         raw_meta = _recv_line(sock)
         if raw_meta.startswith("ERROR"):
             raise TcpTransferError(raw_meta)
