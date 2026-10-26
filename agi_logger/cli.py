@@ -19,6 +19,7 @@ import sqlite3
 import yaml
 
 from . import __version__
+from .path_input import input_path, is_path_key
 from .config import (
     DEFAULT_CONFIG_PATH,
     ConfigError,
@@ -445,7 +446,8 @@ def _settings_menu(config_path: Path, start_section: str | None = None) -> None:
                 else:
                     print(f"Current value: {LIGHT_GRAY}{current_value}{RESET}")
 
-                new_val_str = input("Enter new value (press Enter to keep current): ").strip()
+                new_val_str = (input_path("Enter new value (press Enter to keep current, Tab completes paths): ")
+                               if is_path_key(display_name) else input("Enter new value (press Enter to keep current): ")).strip()
                 if new_val_str == "":
                     print(f"{YELLOW}No change made.{RESET}")
                     time.sleep(0.5)
@@ -906,6 +908,17 @@ def _curses_multiselect(
         return "cancel", set()
 
 
+def _choose_transfer_root(config: Dict[str, Any], default_dir: str) -> str:
+    """With flight sessions enabled, ask whether to send rosbags or flight sessions; both are directories and
+    go through the same streaming tar transfer."""
+    fs_cfg = config.get("agi_logger", {}).get("flight_session", {}) or {}
+    if not fs_cfg.get("enabled") or not sys.stdin.isatty():
+        return default_dir
+    session_dir = str(Path(str(fs_cfg.get("session_path", "~/agi_flights"))).expanduser())
+    choice = input(f"\nSend [b]ags ({default_dir}) or [f]light sessions ({session_dir})? [b/f]: ").strip().lower()
+    return session_dir if choice.startswith("f") else default_dir
+
+
 def _select_bags_interactive(initial_dir: str) -> Tuple[List[Path], str]:
     current_dir = str(Path(initial_dir).expanduser().resolve())
     selected_indices: Set[int] = set()
@@ -921,7 +934,7 @@ def _select_bags_interactive(initial_dir: str) -> Tuple[List[Path], str]:
         if action == "cancel":
             return [], current_dir
         if action == "change":
-            new_path = input("\nEnter bag directory path: ").strip()
+            new_path = input_path("\nEnter bag directory path (Tab completes): ").strip()
             if new_path:
                 expanded = str(Path(new_path).expanduser().resolve())
                 if Path(expanded).exists() and Path(expanded).is_dir():
@@ -956,7 +969,7 @@ def _tcp_send(args: argparse.Namespace) -> int:
 
     if not file_paths:
         default_dir = str(logger_cfg.get("bag_path") or server_cfg.get("file_path") or "/workspaces/logging/test_bags")
-        selected_paths, chosen_dir = _select_bags_interactive(default_dir)
+        selected_paths, chosen_dir = _select_bags_interactive(_choose_transfer_root(config, default_dir))
         if not selected_paths:
             print("No bags selected for transfer.")
             return 0
@@ -1024,7 +1037,7 @@ def _tcp_server_flow(config_path: Path) -> None:
     port = int(server_cfg.get("port", 6000))
     default_dir = str(logger_cfg.get("bag_path") or server_cfg.get("file_path") or "/workspaces/logging/test_bags")
 
-    selected_paths, chosen_dir = _select_bags_interactive(default_dir)
+    selected_paths, chosen_dir = _select_bags_interactive(_choose_transfer_root(config, default_dir))
     if not selected_paths:
         return
 
@@ -1153,7 +1166,7 @@ def _tcp_client_flow(config_path: Path) -> None:
                 continue
 
             if action in {"3", "d", "dest"}:
-                new_dest = input(f"Enter destination path [{dest}]: ").strip()
+                new_dest = input_path(f"Enter destination path [{dest}] (Tab completes): ").strip()
                 if new_dest:
                     dest = str(Path(new_dest).expanduser().resolve())
                     is_dirty = True
@@ -1506,7 +1519,7 @@ def _play_menu(
         if action == "cancel":
             return 0
         if action == "change":
-            new_path = input("\nEnter absolute bag directory path: ").strip()
+            new_path = input_path("\nEnter absolute bag directory path (Tab completes): ").strip()
             if new_path:
                 expanded = str(Path(new_path).expanduser().resolve())
                 if Path(expanded).exists():
@@ -1567,6 +1580,18 @@ def _play_command(args: argparse.Namespace) -> int:
     )
 
 
+def _reader_command(args: argparse.Namespace) -> int:
+    from .reader.server import default_root, serve
+    root = Path(args.root).expanduser() if args.root else default_root(args.config)
+    if not root.is_dir():
+        print(f"{RED}No flight sessions folder: {root}{RESET}")
+        return 1
+    if args.host not in ("127.0.0.1", "localhost"):
+        print(f"{YELLOW}Serving on all interfaces: anyone on this network can read the flight logs.{RESET}")
+    serve(root, args.host, args.port)
+    return 0
+
+
 def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int:
     while True:
         try:
@@ -1575,8 +1600,9 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
             print(f"{GREEN}1){RESET} Record")
             print(f"{GREEN}2){RESET} Transfer")
             print(f"{GREEN}3){RESET} Play")
-            print(f"{GREEN}4){RESET} Settings")
-            print(f"{GREEN}5){RESET} Exit")
+            print(f"{GREEN}4){RESET} Flight log reader (browser)")
+            print(f"{GREEN}5){RESET} Settings")
+            print(f"{GREEN}6){RESET} Exit")
             choice = input(f"\n{BOLD}Select option:{RESET} ").strip()
         except KeyboardInterrupt:
             print("\nExiting.")
@@ -1619,11 +1645,21 @@ def _interactive_menu(parser: argparse.ArgumentParser, config_path: Path) -> int
             continue
 
         if choice == "4":
+            try:
+                lan = input("Allow other computers on the network to open it? [y/N]: ").strip().lower().startswith("y")
+            except KeyboardInterrupt:
+                continue
+            argv = ["--config", str(config_path), "reader"] + (["--host", "0.0.0.0"] if lan else [])
+            args = parser.parse_args(argv)
+            args.func(args)
+            continue
+
+        if choice == "5":
             args = parser.parse_args(["--config", str(config_path), "settings"])
             args.func(args)
             continue
 
-        if choice == "5" or choice.lower() in {"q", "exit", "quit"}:
+        if choice == "6" or choice.lower() in {"q", "exit", "quit"}:
             return 0
 
         continue
@@ -1709,6 +1745,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Filter specific topics to play (skips interactive filter checklist)",
     )
     play_parser.set_defaults(func=_play_command)
+
+    reader_parser = subparsers.add_parser("reader", help="Browse flight sessions in a web browser")
+    reader_parser.add_argument("--root", type=Path, help="flight-session folder (default: flight_session.session_path)")
+    reader_parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to allow other computers")
+    reader_parser.add_argument("--port", type=int, default=8080)
+    reader_parser.set_defaults(func=_reader_command)
 
     tcp_parser = subparsers.add_parser("tcp", help="TCP file transfer")
     tcp_sub = tcp_parser.add_subparsers(dest="tcp_cmd", required=True)

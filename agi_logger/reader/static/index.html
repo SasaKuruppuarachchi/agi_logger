@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agi-logger flights</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2433; --muted: #667085; --line: #e3e6eb; --accent: #2f6fdb;
+  --c1: #2f6fdb; --c2: #d9822b; --c3: #1f9e6e; --c4: #b04fbf; --c5: #c0392b;
+  --ok: #1f9e6e; --warn: #c98a12; --err: #c0392b; --arm: rgba(47,111,219,0.14); --cursor: #c0392b;
+  --sel: #eaf1fd;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #12151b; --panel: #1a1f27; --ink: #e4e8ef; --muted: #8b95a7; --line: #2b323d; --accent: #6ea0f5;
+    --c1: #6ea0f5; --c2: #f0a45a; --c3: #4cc79a; --c4: #d58ae2; --c5: #f07167;
+    --ok: #4cc79a; --warn: #e5b04a; --err: #f07167; --arm: rgba(110,160,245,0.16); --cursor: #f07167; --sel: #223049; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+#app { display: grid; grid-template-columns: 300px 1fr; min-height: 100vh; }
+aside { border-right: 1px solid var(--line); background: var(--panel); overflow-y: auto; max-height: 100vh; position: sticky; top: 0; }
+aside h1 { font-size: 15px; margin: 0; padding: 14px 16px; border-bottom: 1px solid var(--line); letter-spacing: .2px; }
+aside h1 span { color: var(--muted); font-weight: 400; }
+.sess { padding: 10px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.sess:hover { background: var(--sel); }
+.sess.active { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
+.sess .id { font-weight: 600; font-variant-numeric: tabular-nums; }
+.sess .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-right: 4px; }
+.b-ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.b-warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.b-err { background: color-mix(in srgb, var(--err) 18%, transparent); color: var(--err); }
+.b-mut { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+main { padding: 16px 20px 40px; min-width: 0; }
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+header.top h2 { margin: 0; font-size: 19px; font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; color: var(--muted); font-size: 12px; }
+.chip { border: 1px solid var(--line); border-radius: 12px; padding: 2px 9px; background: var(--panel); }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 6px 0 12px; }
+.tab { padding: 7px 12px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+.tab.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.scrub { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px; position: sticky; top: 0; z-index: 5; margin-bottom: 12px; }
+.scrub input[type=range] { flex: 1; accent-color: var(--accent); }
+.scrub .time { font-variant-numeric: tabular-nums; min-width: 120px; text-align: right; }
+button, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.grid { display: grid; grid-template-columns: minmax(280px, 400px) 1fr; gap: 12px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.panel h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 600; }
+#cam { width: 100%; aspect-ratio: 4/3; object-fit: contain; background: color-mix(in srgb, var(--muted) 12%, transparent); border-radius: 6px; display: block; }
+.camnote { color: var(--muted); font-size: 12px; margin-top: 4px; }
+canvas { width: 100%; display: block; }
+#traj { height: 300px; }
+.chart { height: 110px; }
+.strip { height: 22px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+.legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+.readout { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; float: right; text-transform: none; letter-spacing: 0; font-weight: 400; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.ev { cursor: pointer; }
+tr.ev:hover { background: var(--sel); }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+a { color: var(--accent); }
+.empty { color: var(--muted); padding: 40px; text-align: center; }
+.filters { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.hidden { display: none !important; }
+@media (max-width: 900px) {
+  #app { grid-template-columns: 1fr; }
+  aside { max-height: 40vh; position: static; }
+  .grid { grid-template-columns: 1fr; }
+  main { padding: 12px 16px 30px; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <h1>agi-logger <span>flight sessions</span></h1>
+    <div id="sessions"><div class="empty">Loading…</div></div>
+  </aside>
+  <main>
+    <div id="nosel" class="empty">Select a flight session.</div>
+    <div id="view" class="hidden">
+      <header class="top"><h2 id="title"></h2><div class="chips" id="chips"></div></header>
+      <div class="tabs">
+        <div class="tab active" data-tab="overview">Overview</div>
+        <div class="tab" data-tab="events">Events</div>
+        <div class="tab" data-tab="mission">Mission &amp; configs</div>
+      </div>
+      <div class="scrub">
+        <button id="play" title="Play / pause (space)">▶</button>
+        <select id="speed" title="Playback speed"><option>1</option><option selected>5</option><option>20</option><option>60</option></select>
+        <input id="slider" type="range" min="0" max="1000" value="0" step="1" aria-label="Time">
+        <div class="time" id="tlabel">0.0 s</div>
+      </div>
+      <section id="tab-overview">
+        <div class="grid">
+          <div style="display:flex;flex-direction:column;gap:12px;min-width:0">
+            <div class="panel"><h3>Camera</h3><img id="cam" alt=""><div class="camnote" id="camnote"></div></div>
+            <div class="panel"><h3>Trajectory (top-down) <span class="readout" id="trajro"></span></h3>
+              <div class="legend"><span><i style="background:var(--c1)"></i>PX4 local position</span><span><i style="background:var(--c2)"></i>LIOM (aligned to PX4)</span><span id="alignro"></span></div>
+              <canvas id="traj"></canvas></div>
+          </div>
+          <div class="panel" id="charts"></div>
+        </div>
+      </section>
+      <section id="tab-events" class="hidden">
+        <div class="filters" id="evfilters"></div>
+        <div class="panel"><table><thead><tr><th>time</th><th>level</th><th>source</th><th>message</th></tr></thead><tbody id="evbody"></tbody></table></div>
+      </section>
+      <section id="tab-mission" class="hidden"><div id="mission"></div></section>
+    </div>
+  </main>
+</div>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtT = (t) => { const m = Math.floor(t / 60), s = t - 60 * m; return (m ? m + ":" + String(s.toFixed(1)).padStart(4, "0") : s.toFixed(1)) + " s"; };
+const fmtB = (b) => b == null ? "?" : b > 1e9 ? (b / 1e9).toFixed(2) + " GB" : b > 1e6 ? (b / 1e6).toFixed(1) + " MB" : (b / 1e3).toFixed(0) + " kB";
+const reasonBadge = (r) => r === "disarm" ? `<span class="badge b-ok">disarm</span>` : r ? `<span class="badge b-warn">${esc(r)}</span>` : `<span class="badge b-mut">open</span>`;
+
+let S = null, sid = null, cursor = 0, playing = false, lastFrame = 0, charts = [];
+
+async function getJSON(u) { const r = await fetch(u); if (!r.ok) throw new Error(await r.text()); return r.json(); }
+
+async function loadSessions() {
+  const list = await getJSON("api/sessions");
+  const el = $("#sessions");
+  if (!list.length) { el.innerHTML = `<div class="empty">No sessions yet.</div>`; return; }
+  el.innerHTML = list.map((s) => `<div class="sess" data-id="${esc(s.id)}">
+    <div class="id">${esc(s.id)}</div>
+    <div class="meta">${reasonBadge(s.end_reason)} ${s.duration_s != null ? fmtT(s.duration_s) : ""} · ${fmtB(s.total_bytes)}${s.dirty && s.dirty.length ? ` · <span class="badge b-warn" title="uncommitted changes">dirty: ${esc(s.dirty.join(", "))}</span>` : ""}</div>
+    <div class="meta">${esc((s.mission_files || []).join(", "))}</div></div>`).join("");
+  el.querySelectorAll(".sess").forEach((d) => d.addEventListener("click", () => openSession(d.dataset.id)));
+  const [want, wantTab] = decodeURIComponent(location.hash.slice(1)).split("/");
+  if (want && list.some((s) => s.id === want)) openSession(want).then(() => wantTab && setTab(wantTab));
+}
+
+async function openSession(id) {
+  sid = id; history.replaceState(null, "", "#" + encodeURIComponent(id));
+  document.querySelectorAll(".sess").forEach((d) => d.classList.toggle("active", d.dataset.id === id));
+  $("#nosel").classList.add("hidden"); $("#view").classList.remove("hidden");
+  $("#title").textContent = id; $("#chips").innerHTML = "loading…";
+  const [sum, man] = await Promise.all([getJSON(`api/sessions/${encodeURIComponent(id)}/summary`), getJSON(`api/sessions/${encodeURIComponent(id)}/manifest`)]);
+  S = { sum, man, dur: Math.max(sum.duration || 0, ...Object.values(sum.series).map((s) => s.t[s.t.length - 1] || 0)) };
+  renderHeader(); buildCharts(); renderEvents(); renderMission(); setCursor(0);
+}
+
+function renderHeader() {
+  const m = S.man, sw = (m.software || []).map((s) => `${s.path.split("/").pop()} ${(s.commit || "?").slice(0, 8)}${s.dirty ? "*" : ""}`);
+  $("#chips").innerHTML = [reasonBadge(m.end_reason), fmtT(S.dur), fmtB(m.total_bytes), m.host, m.namespace,
+    (m.profiles || []).join(" + "), ...sw].filter(Boolean).map((c) => `<span class="chip">${c}</span>`).join("");
+}
+
+/* ---------------------------------------------------------------- charts */
+function sizeCanvas(c) {
+  const r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  c.width = Math.max(1, r.width * dpr); c.height = Math.max(1, r.height * dpr);
+  const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); return [g, r.width, r.height];
+}
+const PAD = { l: 44, r: 8, t: 6, b: 16 };
+
+function chartSpecs() {
+  const s = S.sum.series, sp = [];
+  const line = (name, key, color, label) => s[name] && s[name][key] ? { t: s[name].t, v: s[name][key], color, label } : null;
+  sp.push({ title: "Altitude", unit: "m", lines: [line("px4_pos", "z", "--c1", "PX4"), line("liom_pos", "z", "--c2", "LIOM")] });
+  sp.push({ title: "Speed", unit: "m/s", lines: [line("speed", "v", "--c1", "|v|"), line("speed", "vz", "--c3", "v up")] });
+  sp.push({ title: "Battery", unit: "%", lines: [line("battery", "pct", "--c3", "remaining")] });
+  sp.push({ title: "Computer", unit: "", lines: [line("health", "load1", "--c4", "load (1 min)"), line("health", "temp", "--c5", "temp °C")] });
+  sp.push({ title: "LIOM health", unit: "", lines: [line("liom", "score_t", "--c1", "score t"), line("liom", "score_r", "--c2", "score r"), line("liom", "n_deg", "--c5", "degenerate dirs")] });
+  return sp.map((c) => ({ ...c, lines: c.lines.filter(Boolean) })).filter((c) => c.lines.length);
+}
+
+function buildCharts() {
+  const host = $("#charts"); host.innerHTML = ""; charts = [];
+  host.insertAdjacentHTML("beforeend", `<h3>Timeline <span class="readout" id="tlro"></span></h3><canvas class="strip" id="strip-arm"></canvas><canvas class="strip" id="strip-nav"></canvas><canvas class="strip" id="strip-phase"></canvas>`);
+  for (const spec of chartSpecs()) {
+    const id = "ch" + charts.length;
+    host.insertAdjacentHTML("beforeend", `<h3 style="margin-top:10px">${esc(spec.title)} <span class="readout" id="${id}ro"></span></h3>
+      <div class="legend">${spec.lines.map((l) => `<span><i style="background:var(${l.color})"></i>${esc(l.label)}</span>`).join("")}</div>
+      <canvas class="chart" id="${id}"></canvas>`);
+    charts.push({ ...spec, id });
+  }
+  host.querySelectorAll("canvas").forEach((c) => {
+    const seek = (e) => { const r = c.getBoundingClientRect(); const x = e.clientX - r.left;
+      setCursor(Math.max(0, Math.min(1, (x - PAD.l) / (r.width - PAD.l - PAD.r))) * S.dur); };
+    c.addEventListener("pointerdown", (e) => { seek(e); c.setPointerCapture(e.pointerId); });
+    c.addEventListener("pointermove", (e) => { if (e.buttons) seek(e); });
+  });
+  drawAll();
+}
+
+function xOf(t, w) { return PAD.l + (t / (S.dur || 1)) * (w - PAD.l - PAD.r); }
+
+function drawChart(spec) {
+  const c = document.getElementById(spec.id); const [g, w, h] = sizeCanvas(c);
+  let lo = Infinity, hi = -Infinity;
+  for (const l of spec.lines) for (const v of l.v) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  if (!isFinite(lo)) { lo = 0; hi = 1; } if (hi - lo < 1e-6) { hi += 0.5; lo -= 0.5; }
+  const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+  const yOf = (v) => PAD.t + (1 - (v - lo) / (hi - lo)) * (h - PAD.t - PAD.b);
+  armBands(g, w, h);
+  g.strokeStyle = css("--line"); g.fillStyle = css("--muted"); g.font = "11px system-ui"; g.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) { const v = lo + (hi - lo) * i / 3, y = yOf(v);
+    g.beginPath(); g.moveTo(PAD.l, y); g.lineTo(w - PAD.r, y); g.stroke(); g.fillText(v.toFixed(Math.abs(hi - lo) < 5 ? 2 : 0), 4, y + 4); }
+  for (const l of spec.lines) {
+    g.strokeStyle = css(l.color); g.lineWidth = 1.5; g.beginPath(); let pen = false;
+    for (let i = 0; i < l.t.length; i++) { const v = l.v[i];
+      if (v == null) { pen = false; continue; }
+      const x = xOf(l.t[i], w), y = yOf(v); pen ? g.lineTo(x, y) : g.moveTo(x, y); pen = true; }
+    g.stroke();
+  }
+  cursorLine(g, w, h);
+  const ro = spec.lines.map((l) => { const v = valueAt(l.t, l.v, cursor); return v == null ? null : `${l.label} ${v.toFixed(2)}${spec.unit ? " " + spec.unit : ""}`; }).filter(Boolean).join(" · ");
+  document.getElementById(spec.id + "ro").textContent = ro;
+}
+
+function armBands(g, w, h) {
+  g.fillStyle = css("--arm");
+  for (const [a, b] of S.sum.timeline.arm) g.fillRect(xOf(a, w), 0, Math.max(1, xOf(b, w) - xOf(a, w)), h);
+}
+function cursorLine(g, w, h) { const x = xOf(cursor, w); g.strokeStyle = css("--cursor"); g.lineWidth = 1.5; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+
+function valueAt(ts, vs, t) {
+  if (!ts.length) return null; let lo = 0, hi = ts.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (ts[m] <= t) lo = m; else hi = m - 1; }
+  return ts[lo] <= t + 1 ? vs[lo] : null;
+}
+function stateAt(list, t) { let cur = null; for (const [tt, v] of list) { if (tt <= t) cur = v; else break; } return cur; }
+
+const STRIP_COLORS = ["--c1", "--c2", "--c3", "--c4", "--c5"];
+function drawStrip(id, items, label) {
+  const c = document.getElementById(id); const [g, w, h] = sizeCanvas(c);
+  g.font = "11px system-ui"; g.fillStyle = css("--muted"); g.fillText(label, 2, 15);
+  const names = [...new Set(items.map((i) => i[1]))];
+  items.forEach(([t, v], i) => {
+    const t1 = i + 1 < items.length ? items[i + 1][0] : S.dur, x0 = xOf(t, w), x1 = xOf(t1, w);
+    g.fillStyle = css(STRIP_COLORS[names.indexOf(v) % STRIP_COLORS.length]); g.globalAlpha = 0.35;
+    g.fillRect(x0, 3, Math.max(1, x1 - x0), h - 6); g.globalAlpha = 1;
+    if (x1 - x0 > 40) { g.fillStyle = css("--ink"); g.fillText(String(v).slice(0, Math.floor((x1 - x0) / 6.5)), x0 + 3, 15); }
+  });
+  cursorLine(g, w, h);
+}
+
+function drawTraj() {
+  const c = $("#traj"); const [g, w, h] = sizeCanvas(c), s = S.sum.series;
+  const tracks = [["px4_pos", "--c1"], [s.liom_aligned ? "liom_aligned" : "liom_pos", "--c2"]].filter(([n]) => s[n]);
+  const al = S.sum.liom_alignment;
+  $("#alignro").textContent = al ? `fit: yaw ${al.yaw_deg}°, rms ${al.rms_xy_m} m` : "";
+  if (!tracks.length) { g.fillStyle = css("--muted"); g.fillText("no position data", 10, 20); return; }
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [n] of tracks) for (let i = 0; i < s[n].t.length; i++) { const x = s[n].x[i], y = s[n].y[i];
+    if (x == null) continue; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const span = Math.max(x1 - x0, y1 - y0, 1) * 1.1, k = Math.min(w, h) / span, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const P = (e, n) => [w / 2 + (e - cx) * k, h / 2 - (n - cy) * k];  // east right, north up
+  g.strokeStyle = css("--line"); g.lineWidth = 1; g.font = "11px system-ui"; g.fillStyle = css("--muted");
+  const grid = Math.pow(10, Math.floor(Math.log10(span / 2)));
+  g.fillText(`grid ${grid} m · N up`, 6, h - 6);
+  for (const [n, col] of tracks) {
+    g.strokeStyle = css(col); g.lineWidth = 1.6; g.beginPath(); let pen = false;
+    for (let i = 0; i < s[n].t.length; i++) { if (s[n].x[i] == null) { pen = false; continue; }
+      const [px, py] = P(s[n].x[i], s[n].y[i]); pen ? g.lineTo(px, py) : g.moveTo(px, py); pen = true; }
+    g.stroke();
+    const xe = valueAt(s[n].t, s[n].x, cursor), xn = valueAt(s[n].t, s[n].y, cursor);
+    if (xe != null) { const [px, py] = P(xe, xn); g.fillStyle = css(col); g.beginPath(); g.arc(px, py, 5, 0, 7); g.fill();
+      g.strokeStyle = css("--panel"); g.lineWidth = 2; g.stroke(); }
+  }
+  const p = s.px4_pos || s.liom_pos;
+  const ro = p ? [valueAt(p.t, p.x, cursor), valueAt(p.t, p.y, cursor), valueAt(p.t, p.z, cursor)] : [];
+  $("#trajro").textContent = ro[0] != null ? `E ${ro[0].toFixed(1)}  N ${ro[1].toFixed(1)}  up ${ro[2].toFixed(1)} m` : "";
+}
+
+function drawCam() {
+  const th = S.sum.thumbs, img = $("#cam");
+  img.classList.toggle("hidden", !th.length);
+  if (!th.length) { img.removeAttribute("src"); $("#camnote").textContent = "No camera thumbnails in this session."; return; }
+  let best = th[0]; for (const t of th) { if (t.t <= cursor) best = t; else break; }
+  const src = `api/sessions/${encodeURIComponent(sid)}/thumbs/${best.file}`;
+  if (img.dataset.src !== src) { img.src = src; img.dataset.src = src; }
+  $("#camnote").textContent = `${best.topic} · frame at ${fmtT(best.t)} (${th.length} thumbnails)`;
+}
+
+function drawAll() {
+  if (!S) return;
+  drawStrip("strip-arm", S.sum.timeline.arm.flatMap(([a, b]) => [[a, "ARMED"], [b, "disarmed"]]).sort((x, y) => x[0] - y[0]), "armed");
+  drawStrip("strip-nav", S.sum.timeline.nav, "mode");
+  drawStrip("strip-phase", S.sum.timeline.phase, "phase");
+  $("#tlro").textContent = [stateAt(S.sum.timeline.nav, cursor), stateAt(S.sum.timeline.phase, cursor)].filter(Boolean).join(" · ");
+  charts.forEach(drawChart); drawTraj(); drawCam();
+}
+
+function setCursor(t) {
+  cursor = Math.max(0, Math.min(S.dur, t));
+  $("#slider").value = Math.round(1000 * cursor / (S.dur || 1));
+  $("#tlabel").textContent = `${fmtT(cursor)} / ${fmtT(S.dur)}`;
+  drawAll();
+}
+
+/* ---------------------------------------------------------------- events + mission */
+let levelFilter = new Set(["INFO", "WARN", "ERROR", "FATAL"]);
+function renderEvents() {
+  const levels = ["DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
+  $("#evfilters").innerHTML = levels.map((l) => `<button data-l="${l}" style="opacity:${levelFilter.has(l) ? 1 : .45}">${l}</button>`).join("");
+  $("#evfilters").querySelectorAll("button").forEach((b) => b.onclick = () => {
+    levelFilter.has(b.dataset.l) ? levelFilter.delete(b.dataset.l) : levelFilter.add(b.dataset.l); renderEvents(); });
+  const cls = (l) => l === "WARN" ? "b-warn" : (l === "ERROR" || l === "FATAL") ? "b-err" : "b-mut";
+  $("#evbody").innerHTML = S.sum.events.filter((e) => levelFilter.has(e.level)).map((e) =>
+    `<tr class="ev" data-t="${e.t}"><td class="num">${fmtT(e.t)}</td><td><span class="badge ${cls(e.level)}">${esc(e.level)}</span></td><td>${esc(e.source)}</td><td>${esc(e.text)}</td></tr>`).join("")
+    || `<tr><td colspan="4" class="empty">No events.</td></tr>`;
+  $("#evbody").querySelectorAll("tr.ev").forEach((r) => r.onclick = () => { setTab("overview"); setCursor(+r.dataset.t); });
+}
+
+function renderMission() {
+  const m = S.man, f = (p) => `api/sessions/${encodeURIComponent(sid)}/files/${p}`;
+  const sw = (m.software || []).map((s) => `<tr><td>${esc(s.path)}</td><td class="mono">${esc(s.commit || "—")}</td><td>${esc(s.branch || "")}</td><td>${s.dirty ? `<span class="badge b-warn">dirty</span>` : `<span class="badge b-ok">clean</span>`}</td></tr>`).join("");
+  const procs = ((m.mission || {}).processes || []).map((p) => `<tr><td class="num">${p.pid}</td><td class="mono">${esc(p.cmdline.join(" "))}</td><td class="mono">${esc(Object.entries(p.env || {}).map(([k, v]) => k + "=" + v).join("  "))}</td></tr>`).join("");
+  const cfgs = ((m.mission || {}).config_files || []).map((c) => `<tr><td><a href="${f(c.copy)}" target="_blank">${esc(c.original.split("/").pop())}</a></td><td class="mono">${esc(c.original)}</td></tr>`).join("");
+  const coll = (m.files_collected || []).map((c) => `<tr><td><a href="${f(c.copy)}" target="_blank">${esc(c.original.split("/").pop())}</a></td><td class="mono">${esc(c.original)}</td><td class="num">${fmtB(c.bytes)}</td></tr>`).join("");
+  const rec = Object.entries(m.recorders || {}).flatMap(([prof, st]) => Object.entries(st.topics || {}).map(([t, v]) =>
+    `<tr><td>${esc(prof)}</td><td class="mono">${esc(t)}</td><td class="num">${v.written}</td><td class="num">${v.throttled}</td><td class="num">${v.dropped ? `<span class="badge b-err">${v.dropped}</span>` : 0}</td></tr>`)).join("");
+  const missing = Object.entries(m.recorders || {}).flatMap(([p, st]) => (st.missing || []).map((t) => `${p}: ${t}`));
+  const sec = (title, head, body) => `<div class="panel" style="margin-bottom:12px"><h3>${title}</h3>${body ? `<table><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>` : `<div class="camnote">none</div>`}</div>`;
+  $("#mission").innerHTML =
+    `<div class="panel" style="margin-bottom:12px"><h3>Session</h3><table><tbody>
+      <tr><th>start</th><td>${esc(m.start_time_iso)}</td><th>end</th><td>${esc(m.end_time_iso || "")} (${esc(m.end_reason || "open")})</td></tr>
+      <tr><th>host</th><td>${esc(m.host)} · ${esc(m.user)} · ${esc(m.kernel)}</td><th>ROS</th><td>${esc(m.ros_distro)} · agi_logger ${esc(m.agi_logger_version)}</td></tr>
+      <tr><th>sizes</th><td colspan="3">${Object.entries(m.sizes_bytes || {}).map(([k, v]) => `${esc(k)} ${fmtB(v)}`).join(" · ")}</td></tr>
+      <tr><th>files</th><td colspan="3"><a href="${f("manifest.json")}" target="_blank">manifest.json</a>${(m.repairs || []).length ? ` · repairs: ${esc(m.repairs.map((r) => r.file + " " + r.action).join(", "))}` : ""}${missing.length ? ` · <span class="badge b-warn">not recorded</span> ${esc(missing.join(", "))}` : ""}</td></tr>
+    </tbody></table></div>` +
+    sec("Software", ["repository", "commit", "branch", ""], sw) +
+    sec("Config files used", ["file", "original path"], cfgs) +
+    sec("Stack processes", ["pid", "command line", "environment"], procs) +
+    sec("Files written during the flight", ["file", "original path", "size"], coll) +
+    sec("Recorder statistics", ["profile", "topic", "written", "throttled", "dropped"], rec);
+}
+
+/* ---------------------------------------------------------------- controls */
+function setTab(name) {
+  if (!["overview", "events", "mission"].includes(name)) name = "overview";
+  if (sid) history.replaceState(null, "", "#" + encodeURIComponent(sid) + (name === "overview" ? "" : "/" + name));
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+  ["overview", "events", "mission"].forEach((n) => $("#tab-" + n).classList.toggle("hidden", n !== name));
+  if (name === "overview") drawAll();
+}
+document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setTab(t.dataset.tab)));
+$("#slider").addEventListener("input", (e) => setCursor(e.target.value / 1000 * S.dur));
+$("#play").addEventListener("click", togglePlay);
+document.addEventListener("keydown", (e) => {
+  if (!S || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  if (e.code === "ArrowRight") setCursor(cursor + (e.shiftKey ? 10 : 1));
+  if (e.code === "ArrowLeft") setCursor(cursor - (e.shiftKey ? 10 : 1));
+});
+function togglePlay() { playing = !playing; $("#play").textContent = playing ? "❚❚" : "▶"; lastFrame = performance.now(); if (playing) requestAnimationFrame(tick); }
+function tick(now) {
+  if (!playing) return;
+  const dt = (now - lastFrame) / 1000; lastFrame = now;
+  setCursor(cursor + dt * +$("#speed").value);
+  if (cursor >= S.dur) { togglePlay(); return; }
+  requestAnimationFrame(tick);
+}
+new ResizeObserver(() => drawAll()).observe($("main"));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+loadSessions().catch((e) => { $("#sessions").innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+</script>
+</body>
+</html>

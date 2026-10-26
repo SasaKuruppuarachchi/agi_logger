@@ -129,6 +129,77 @@ The catalogue provides standard topic mappings configured for Agipix robotics pl
 
 ---
 
+## ✈️ Flight Sessions (flight log + optional diagnostic log)
+
+Every arm → disarm of the drone becomes one **flight session**. It runs alongside the rosbag recording above and is
+independent of it (the bag recording is unchanged). Enable it with `flight_session.enabled` in `cfg/configs.yaml`.
+The armed state comes from `logger.auto_start_topic` (`/fmu/out/vehicle_status_v1`).
+
+```
+<flight_session.session_path>/<YYYYmmdd_HHMMSS>[_<name>]/
+  manifest.json          drone, host, times, how it ended, git commit/branch/dirty of the stack repos, mission
+                         (command lines of the stack's processes, AGIPIX_* environment, config files they use),
+                         recorder stats, repairs, collected files, sizes
+  config/                copies of the config files from those command lines (+ this logger's config)
+  flight_log/            curated, rate-limited MCAP (profile `flight`): PX4 state and commands, LIOM odometry and
+                         health, mission status, battery, WARN+ rosout, 1 Hz camera thumbnails, logger health
+  diag_log/              optional full-rate MCAP (profile `diagnostic`, `flight_session.diagnostic: true`)
+  files/                 component files written during the flight (`flight_session.collect` globs)
+```
+
+- **Small:** the flight log is about 5 KB/s, a few MB per flight, so it can be pulled over Wi-Fi right after
+  landing. MCAP opens directly in Foxglove; `/agi_logger/health` and the camera `/thumbnail` topics are for the
+  log browser.
+- **Non-blocking:**
+  - Each profile is recorded by its own low-priority process (`nice`, `ionice`).
+  - Callbacks only rate-limit and queue serialized messages; a full queue drops and counts, never waits.
+  - Session start and stop run off the ROS thread.
+- **Robust:**
+  - Logs are written in small zstd chunks and split into complete 10 s MCAP segments (`segment_s`), so a crash or
+    power loss costs at most the open segment.
+  - On the next start the logger closes an interrupted session (`end_reason: recovered_after_restart`), salvages
+    the open segment (`mcap recover`) and regenerates the bag metadata (`ros2 bag reindex`).
+  - Disarm has a grace period (`disarm_grace_s`); a re-arm within it continues the same session.
+- **Announced to the stack:** `~/.agi_logger/current_session.json` and the latched topic `/<ns>/logger/session`
+  (std_msgs/String JSON: `active`, `path`, `id`), so components can write into the session.
+- **Transfer:** the TCP send / server menus ask whether to send bags or flight sessions, then use the same
+  streaming transfer.
+
+Profiles are lists of topics: a plain string, or a dict with `max_hz`, `latched`, `min_level` (rosout) or
+`thumbnail: {max_hz, width, quality}`. `{ns}` expands to `flight_session.namespace`.
+
+### Flight log reader (browser)
+
+`agi-logger reader` (or main menu → **4 Flight log reader**) serves the flight sessions to a web browser:
+http://localhost:8080/. Use `--host 0.0.0.0` to open it from a laptop on the drone's network, and `--root` for
+another sessions folder.
+
+It is self-contained (no internet, no extra packages) and reads the flight logs with rosbag2, so run it where ROS is
+sourced (the ROS container).
+
+- **Session list:** start, duration, how it ended (`disarm` / `recovered_after_restart`), size, mission files,
+  dirty repositories.
+- **Overview, everything synced to one time cursor** (slider, ▶ playback at 1–60×, ←/→ keys, click or drag on any
+  chart):
+  - camera thumbnail;
+  - top-down trajectory: PX4 local position plus LIOM, fitted onto PX4 with a 2D rotation and offset, so what
+    remains is drift;
+  - armed / mode / mission-phase strips;
+  - altitude, speed, battery, computer load and temperature, LIOM solve health.
+- **Events:** arm and disarm, mode and phase changes, vehicle commands and acks, WARN+ rosout, session end;
+  filter by level, click to jump.
+- **Mission & configs:** the manifest view, with software commits, the config and launch-parameter files used
+  (click to open), stack process command lines and environment, collected files, recorder statistics.
+- **Links:** `#<session>` or `#<session>/events|mission` open a session or tab directly.
+
+The summary is cached in `<session>/.reader/` and rebuilt when the logs change.
+
+Checks:
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q tests`: unit tests.
+- `python3 tests/integration/arm_cycle_check.py [--crash]`: end to end with a fake PX4 on an isolated ROS
+  domain. Covers the arm cycle, rate limits, thumbnails, the manifest, and with `--crash` a SIGKILL of the logger
+  and recorders mid-flight plus recovery.
+
 ## 🛠️ Architecture & Subsystems
 
 ```mermaid

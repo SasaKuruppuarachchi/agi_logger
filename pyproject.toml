@@ -12,7 +12,10 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["agi_logger"]
+packages = ["agi_logger", "agi_logger.reader"]
+
+[tool.setuptools.package-data]
+"agi_logger.reader" = ["static/*.html"]
 
 [project.scripts]
 agi-logger = "agi_logger.cli:main"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import concurrent.futures
+import json
 import os
 import select
 import shutil
@@ -12,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 try:
     import rclpy
+    from rclpy.executors import ExternalShutdownException
     from rclpy.node import Node
     from rclpy.qos import (
         DurabilityPolicy,
@@ -36,6 +39,7 @@ except ImportError:
 
 
 from .config import load_raw_config, resolve_logger_paths
+from .flight_session import SessionManager
 from .logging_manager import RecorderManager
 from .system_monitor import (
     BOLD,
@@ -72,7 +76,26 @@ class AutoStartLoggerNode(Node):
                 "Neither px4_msgs nor as2_msgs are available. Please source your ROS 2 overlay workspace."
             )
 
-        topic = str(self._logger_cfg.get("auto_start_topic", "/drone0/platform/info"))
+        topic = str(self._logger_cfg.get("auto_start_topic", "/fmu/out/vehicle_status_v1"))
+        self._arm_topic = topic
+
+        # Flight sessions (flight log + optional diagnostic log, manifest, collected files): independent of the
+        # bag autostart above, driven by the same arm signal. Start/stop run on one worker thread so that this
+        # node never waits on recorder start-up or flush.
+        fs_cfg = (self._config.get("agi_logger", {}) or {}).get("flight_session") or {}
+        self._session: Optional[SessionManager] = None
+        self._session_worker = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._disarm_since: Optional[float] = None
+        self._disarm_grace_s = float(fs_cfg.get("disarm_grace_s", 5.0))
+        if fs_cfg.get("enabled", False):
+            from std_msgs.msg import String
+            self._session = SessionManager(fs_cfg, config_path, log=lambda m: self.get_logger().info(m))
+            self._session_pub = self.create_publisher(
+                String, f"/{self._session.namespace}/logger/session",
+                QoSProfile(reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                           history=HistoryPolicy.KEEP_LAST, depth=1))
+            self._session_worker.submit(self._session_recover)
+            self.create_timer(0.5, self._session_tick)
 
         # Best effort QoS profile for high-rate sensor/telemetry compatibility
         qos_profile = QoSProfile(
@@ -162,6 +185,8 @@ class AutoStartLoggerNode(Node):
             if not armed:
                 self._print_disarmed_instructions()
 
+        self._session_on_arm(armed, state_info)
+
         if not self._auto_start:
             return
 
@@ -218,7 +243,56 @@ class AutoStartLoggerNode(Node):
 
         self._last_armed_state = armed
 
+    # ------------------------------------------------------------------ flight sessions
+    def _publish_session(self) -> None:
+        from std_msgs.msg import String
+        self._session_pub.publish(String(data=json.dumps(self._session.announce())))
+
+    def _session_recover(self) -> None:
+        try:
+            self._session.recover_stale()
+        except Exception as exc:
+            self.get_logger().error(f"flight session recovery failed: {exc}")
+        self._publish_session()
+
+    def _session_start(self, trigger: Dict[str, Any]) -> None:
+        try:
+            if not self._session.active:
+                self._session.start(trigger)
+        except Exception as exc:
+            self.get_logger().error(f"flight session start failed: {exc}")
+        self._publish_session()
+
+    def _session_stop(self, reason: str) -> None:
+        try:
+            self._session.stop(reason)
+        except Exception as exc:
+            self.get_logger().error(f"flight session stop failed: {exc}")
+        self._publish_session()
+
+    def _session_on_arm(self, armed: bool, state_info: str) -> None:
+        if self._session is None:
+            return
+        if armed:
+            self._disarm_since = None  # a re-arm within the grace period continues the same session
+            if not self._session.active:
+                trigger = dict(source=self._arm_topic, state=state_info, time=time.time())
+                self._session_worker.submit(self._session_start, trigger)
+        elif self._session.active and self._disarm_since is None:
+            self._disarm_since = time.time()
+
+    def _session_tick(self) -> None:
+        if (self._session is not None and self._session.active and self._disarm_since is not None
+                and time.time() - self._disarm_since >= self._disarm_grace_s):
+            self._disarm_since = None
+            self._session_worker.submit(self._session_stop, "disarm")
+
     def shutdown(self) -> None:
+        if self._session is not None:
+            if self._session.active:
+                self.get_logger().info("Shutting down: closing the active flight session")
+                self._session_worker.submit(self._session_stop, "logger_shutdown")
+            self._session_worker.shutdown(wait=True)
         if self._manager.is_recording():
             self.get_logger().info("Shutting down autostart node: stopping active recording")
             try:
@@ -258,8 +332,8 @@ def run_autostart_node(config_path: Path) -> str:
                         node.get_logger().info("Option 'q' pressed: exiting autostart node...")
                         action = "exit"
                         break
-    except KeyboardInterrupt:
-        action = "exit"
+    except (KeyboardInterrupt, ExternalShutdownException):
+        action = "exit"  # Ctrl-C / SIGINT: rclpy's own handler may already have shut the context down
     finally:
         if old_settings is not None:
             try:
@@ -268,6 +342,6 @@ def run_autostart_node(config_path: Path) -> str:
                 pass
         node.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
     return action
