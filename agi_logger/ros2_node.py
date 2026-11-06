@@ -5,6 +5,7 @@ import json
 import os
 import select
 import shutil
+import signal
 import sys
 import termios
 import time
@@ -59,10 +60,16 @@ from .system_monitor import (
 
 
 class AutoStartLoggerNode(Node):
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, overrides: Optional[Dict[str, Any]] = None) -> None:
         super().__init__("agi_logger_autostart")
         self._config_path = config_path
         self._config = load_raw_config(config_path)
+        # command-line overrides ("logger.auto_start", "flight_session.diagnostic", ...) on top of configs.yaml
+        for dotted, value in (overrides or {}).items():
+            section, _, key = dotted.partition(".")
+            self._config["agi_logger"].setdefault(section, {})[key] = value
+        if overrides:
+            self.get_logger().info(f"command-line overrides: {overrides}")
         self._logger_cfg = resolve_logger_paths(self._config, config_path)
         self._auto_start = bool(self._logger_cfg.get("auto_start", False))
         self._behavior = str(self._logger_cfg.get("auto_start_behavior", "toggle_arm"))
@@ -301,9 +308,16 @@ class AutoStartLoggerNode(Node):
                 pass
 
 
-def run_autostart_node(config_path: Path) -> str:
+def _graceful_exit(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt  # unwinds the spin loop into the normal shutdown (closes the flight session)
+
+
+def run_autostart_node(config_path: Path, overrides: Optional[Dict[str, Any]] = None) -> str:
     rclpy.init()
-    node = AutoStartLoggerNode(config_path)
+    # tmux kill-session sends SIGHUP and service managers SIGTERM: close the session cleanly in both cases
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, _graceful_exit)
+    node = AutoStartLoggerNode(config_path, overrides)
     action = "exit"
 
     is_tty = sys.stdin.isatty()

@@ -1224,7 +1224,18 @@ def _tcp_client_flow(config_path: Path) -> None:
 def _ros2_autostart(args: argparse.Namespace) -> int:
     from .ros2_node import run_autostart_node
 
-    result = run_autostart_node(args.config)
+    overrides = {}
+    if getattr(args, "flight_only", False):
+        overrides["logger.auto_start"] = False
+    if getattr(args, "diagnostic", False):
+        overrides["flight_session.diagnostic"] = True
+    if getattr(args, "no_flight_session", False):
+        overrides["flight_session.enabled"] = False
+    if getattr(args, "namespace", None):
+        overrides["flight_session.namespace"] = args.namespace
+    if getattr(args, "session_path", None):
+        overrides["flight_session.session_path"] = args.session_path
+    result = run_autostart_node(args.config, overrides)
     if result == "menu":
         parser = build_parser()
         return _interactive_menu(parser, args.config)
@@ -1779,7 +1790,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     ros2_parser = subparsers.add_parser("ros2", help="ROS 2 utilities")
     ros2_sub = ros2_parser.add_subparsers(dest="ros2_cmd", required=True)
-    ros2_autostart = ros2_sub.add_parser("autostart", help="Run autostart node")
+    ros2_autostart = ros2_sub.add_parser("autostart", help="Run autostart node (bag autostart + flight sessions)")
+    ros2_autostart.add_argument("--flight-only", action="store_true",
+                                help="flight session only: no rosbag recording on arm (overrides logger.auto_start)")
+    ros2_autostart.add_argument("--diagnostic", action="store_true",
+                                help="also record the full-rate diagnostic log in each flight session")
+    ros2_autostart.add_argument("--no-flight-session", action="store_true", help="disable flight sessions")
+    ros2_autostart.add_argument("--namespace", help="drone namespace (overrides flight_session.namespace)")
+    ros2_autostart.add_argument("--session-path", help="flight-session folder (overrides flight_session.session_path)")
     ros2_autostart.set_defaults(func=_ros2_autostart)
 
     return parser
